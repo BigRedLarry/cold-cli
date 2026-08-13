@@ -1184,7 +1184,7 @@ steps:
 `
 	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content,
 		send_window_start, send_window_end, send_days, timezone)
-		VALUES ('test-add', 'active', 'seq.yml', ?, '00:00', '23:59', '0,1,2,3,4,5,6', 'UTC')`, seqYAML)
+		VALUES ('test-add', 'draft', 'seq.yml', ?, '00:00', '23:59', '0,1,2,3,4,5,6', 'UTC')`, seqYAML)
 	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
 	db.Exec("INSERT INTO leads (email, first_name, domain) VALUES ('existing@acme.com', 'Existing', 'acme.com')")
 	db.Exec("INSERT INTO campaign_leads (campaign_id, lead_id, status) VALUES (1, 1, 'active')")
@@ -1212,6 +1212,237 @@ steps:
 	db.QueryRow("SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = 1").Scan(&totalLeads)
 	if totalLeads != 3 {
 		t.Errorf("expected 3 total leads in campaign, got %d", totalLeads)
+	}
+}
+
+func TestAddLeadsToCampaign_ActiveCampaignRequiresFutureCohortDateAfterStart(t *testing.T) {
+	db := testDB(t)
+	origNow := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = origNow })
+
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	seqYAML := `name: Test
+defaults:
+  from_name: "Test"
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi {{first_name}}"
+    body: "Hello {{first_name}}"
+`
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content, start_date,
+		send_window_start, send_window_end, send_days, timezone)
+		VALUES ('evergreen', 'active', 'seq.yml', ?, '2026-08-18', '09:00', '11:00', '1,2,3,4,5', 'UTC')`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+
+	csvPath := writeTempCSV(t, "email,first_name\nalice@new.com,Alice\n")
+	_, err := AddLeadsToCampaign(db, "evergreen", csvPath, "")
+	if err == nil || !strings.Contains(err.Error(), "provide --start-date") {
+		t.Fatalf("expected explicit cohort start-date error, got %v", err)
+	}
+	_, err = AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-20",
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be in the future") {
+		t.Fatalf("expected future cohort start-date error, got %v", err)
+	}
+
+	result, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+	})
+	if err != nil {
+		t.Fatalf("AddLeadsToCampaignWithOpts error: %v", err)
+	}
+	if result.LeadsAdded != 1 || result.ScheduledSends != 1 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+
+	var sendAt string
+	if err := db.QueryRow("SELECT CAST(send_at AS TEXT) FROM scheduled_sends WHERE campaign_id = 1").Scan(&sendAt); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseDBTimestamp(sendAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.In(time.UTC).Format("2006-01-02"); got != "2026-08-25" {
+		t.Fatalf("expected cohort date 2026-08-25, got %s", got)
+	}
+}
+
+func TestAddLeadsToCampaign_CompletedEvergreenRequiresExplicitReactivation(t *testing.T) {
+	db := testDB(t)
+	origNow := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = origNow })
+
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	seqYAML := `name: Test
+defaults:
+  from_name: "Test"
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi"
+    body: "Hello"
+`
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content, start_date,
+		send_window_start, send_window_end, send_days, timezone)
+		VALUES ('completed-evergreen', 'completed', 'seq.yml', ?, '2026-08-18', '09:00', '11:00', '1,2,3,4,5', 'UTC')`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+	csvPath := writeTempCSV(t, "email\nalice@new.com\n")
+
+	_, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "completed-evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provide --reactivate") {
+		t.Fatalf("expected explicit reactivation error, got %v", err)
+	}
+
+	preview, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "completed-evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+		PreviewOnly:  true,
+		Reactivate:   true,
+	})
+	if err != nil {
+		t.Fatalf("reactivation preview: %v", err)
+	}
+	if !preview.WouldReactivate || len(preview.Emails) != 1 {
+		t.Fatalf("unexpected preview: %+v", preview)
+	}
+	var status string
+	db.QueryRow("SELECT status FROM campaigns WHERE id = 1").Scan(&status)
+	if status != "completed" {
+		t.Fatalf("preview changed status to %q", status)
+	}
+
+	result, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "completed-evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+		Reactivate:   true,
+	})
+	if err != nil {
+		t.Fatalf("reactivating add: %v", err)
+	}
+	if !result.WouldReactivate {
+		t.Fatalf("expected reactivation result: %+v", result)
+	}
+	db.QueryRow("SELECT status FROM campaigns WHERE id = 1").Scan(&status)
+	if status != "active" {
+		t.Fatalf("expected active campaign, got %q", status)
+	}
+}
+
+func TestAddLeadsToCampaign_PreviewOnlyRendersAndRollsBack(t *testing.T) {
+	db := testDB(t)
+	origNow := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = origNow })
+
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	seqYAML := `name: Test
+defaults:
+  from_name: "Test"
+steps:
+  - step: 1
+    delay: 0
+    subject: "{{subject1}}"
+    body: "Hello {{first_name}} at {{company}}"
+  - step: 2
+    delay: 6
+    subject: ""
+    body: "Five more for {{company}}"
+`
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content, start_date,
+		send_window_start, send_window_end, send_days, timezone)
+		VALUES ('preview-evergreen', 'active', 'seq.yml', ?, '2026-08-18', '09:00', '11:00', '1,2,3,4,5', 'UTC')`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+
+	csvPath := writeTempCSV(t, "email,first_name,company,subject1\nalice@new.com,Alice,Acme,3 stores\n")
+	result, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "preview-evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+		PreviewOnly:  true,
+	})
+	if err != nil {
+		t.Fatalf("preview add leads: %v", err)
+	}
+	if !result.PreviewOnly || result.LeadsAdded != 1 || result.ScheduledSends != 2 || len(result.Emails) != 2 {
+		t.Fatalf("unexpected preview result: %+v", result)
+	}
+	if result.Emails[0].AccountEmail != "sender@x.com" || result.Emails[0].Subject != "3 stores" || result.Emails[0].Body != "Hello Alice at Acme" {
+		t.Fatalf("unexpected rendered email: %+v", result.Emails[0])
+	}
+	if result.Emails[0].SendAt[:10] != "2026-08-25" || result.Emails[1].SendAt[:10] != "2026-08-31" {
+		t.Fatalf("unexpected dates: %+v", result.Emails)
+	}
+
+	for table, query := range map[string]string{
+		"lead":          "SELECT COUNT(*) FROM leads WHERE email = 'alice@new.com'",
+		"campaign_lead": "SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = 1",
+		"send":          "SELECT COUNT(*) FROM scheduled_sends WHERE campaign_id = 1",
+	} {
+		var count int
+		if err := db.QueryRow(query).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("preview persisted %s rows: %d", table, count)
+		}
+	}
+}
+
+func TestAddLeadsToCampaign_PreviewOnlyOmitsSkippedExistingLead(t *testing.T) {
+	db := testDB(t)
+	origNow := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = origNow })
+
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	seqYAML := `name: Test
+defaults:
+  from_name: "Test"
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi"
+    body: "Hello {{first_name}}"
+`
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content, start_date,
+		send_window_start, send_window_end, send_days, timezone)
+		VALUES ('preview-skips', 'active', 'seq.yml', ?, '2026-08-18', '09:00', '11:00', '1,2,3,4,5', 'UTC')`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+	db.Exec("INSERT INTO leads (email, first_name) VALUES ('existing@old.com', 'Existing')")
+	db.Exec("INSERT INTO campaign_leads (campaign_id, lead_id, status) VALUES (1, 1, 'active')")
+	db.Exec(`INSERT INTO scheduled_sends (campaign_id, lead_id, account_id, step_number, send_at)
+		VALUES (1, 1, 1, 1, '2026-08-25T09:00:00Z')`)
+
+	csvPath := writeTempCSV(t, "email,first_name\nexisting@old.com,Existing\nnew@new.com,New\n")
+	result, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "preview-skips",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+		PreviewOnly:  true,
+	})
+	if err != nil {
+		t.Fatalf("preview add leads: %v", err)
+	}
+	if result.LeadsAdded != 1 || result.LeadsSkipped != 1 || len(result.Emails) != 1 {
+		t.Fatalf("unexpected preview result: %+v", result)
+	}
+	if result.Emails[0].LeadEmail != "new@new.com" {
+		t.Fatalf("preview included the wrong email: %+v", result.Emails)
 	}
 }
 

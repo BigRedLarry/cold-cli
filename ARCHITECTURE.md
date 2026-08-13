@@ -350,7 +350,7 @@ cold-cli campaign init [directory]
 cold-cli --workspace <id> campaign create --name --sequence --leads --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
 cold-cli --workspace <id> campaign create --name --sequence-inline '...' --leads-inline '...' --accounts
 cold-cli campaign clone <source> --name <new> --leads <csv>  # or --leads-inline
-cold-cli campaign add-leads <name|id> --leads <csv>          # or --leads-inline
+cold-cli campaign add-leads <name|id> --leads <csv> [--start-date YYYY-MM-DD] [--preview-only] [--reactivate]
 cold-cli campaign remove-lead <name|id> <email>
 cold-cli campaign preview <name|id> [--render] [--lead <email>]
 cold-cli campaign activate [--send-now] / pause/resume/status <name|id>

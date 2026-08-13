@@ -1338,6 +1338,9 @@ var campaignAddLeadsCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		leadsFile, _ := cmd.Flags().GetString("leads")
 		leadsInline, _ := cmd.Flags().GetString("leads-inline")
+		startDate, _ := cmd.Flags().GetString("start-date")
+		previewOnly, _ := cmd.Flags().GetBool("preview-only")
+		reactivate, _ := cmd.Flags().GetBool("reactivate")
 		if leadsFile == "" && leadsInline == "" {
 			return fmt.Errorf("provide --leads (file path) or --leads-inline (CSV content)")
 		}
@@ -1353,7 +1356,14 @@ var campaignAddLeadsCmd = &cobra.Command{
 			return err
 		}
 
-		result, err := internal.AddLeadsToCampaign(db, name, leadsFile, leadsInline)
+		result, err := internal.AddLeadsToCampaignWithOpts(db, internal.AddLeadsToCampaignOpts{
+			CampaignName: name,
+			LeadsFile:    leadsFile,
+			LeadsInline:  leadsInline,
+			StartDate:    startDate,
+			PreviewOnly:  previewOnly,
+			Reactivate:   reactivate,
+		})
 		if err != nil {
 			return err
 		}
@@ -1364,6 +1374,14 @@ var campaignAddLeadsCmd = &cobra.Command{
 
 		for _, w := range result.Warnings {
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		}
+		if result.PreviewOnly {
+			fmt.Printf("Preview only for %q; no leads or sends were saved.\n", result.Campaign)
+			for _, email := range result.Emails {
+				fmt.Printf("\nStep %d | %s | %s -> %s\n", email.StepNumber, email.SendAt, email.AccountEmail, email.LeadEmail)
+				fmt.Printf("Subject: %s\n\n%s\n", email.Subject, email.Body)
+			}
+			return nil
 		}
 		fmt.Printf("Added leads to %q\n", result.Campaign)
 		fmt.Printf("  added:   %d\n", result.LeadsAdded)
@@ -2846,6 +2864,9 @@ func init() {
 	campaignCloneCmd.Flags().String("start-date", "", "start date (YYYY-MM-DD); default: schedule from now")
 	campaignAddLeadsCmd.Flags().String("leads", "", "path to leads CSV file (optional per-lead schedule_timezone column supported)")
 	campaignAddLeadsCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads; optional per-lead schedule_timezone column supported)")
+	campaignAddLeadsCmd.Flags().String("start-date", "", "start date for this added cohort (YYYY-MM-DD); required after an active campaign's start date arrives")
+	campaignAddLeadsCmd.Flags().Bool("preview-only", false, "render and schedule the cohort in a rollback-only transaction without saving leads or sends")
+	campaignAddLeadsCmd.Flags().Bool("reactivate", false, "reactivate a completed campaign when adding this new cohort")
 	campaignValidateLeadsCmd.Flags().String("leads", "", "path to leads CSV file")
 	campaignValidateLeadsCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads)")
 	campaignValidateLeadsCmd.Flags().Bool("allow-free-email", false, "allow Gmail/free-mail domains to pass even though exact mailboxes are not SMTP-verified")

@@ -1159,24 +1159,65 @@ func CloneCampaign(db *sql.DB, opts CloneCampaignOpts) (*CreateCampaignResult, e
 
 // AddLeadsResult is returned by AddLeadsToCampaign.
 type AddLeadsResult struct {
-	Campaign       string   `json:"campaign"`
-	LeadsAdded     int      `json:"leads_added"`
-	LeadsSkipped   int      `json:"leads_skipped"`
-	ScheduledSends int      `json:"scheduled_sends"`
-	Warnings       []string `json:"warnings,omitempty"`
+	Campaign        string         `json:"campaign"`
+	LeadsAdded      int            `json:"leads_added"`
+	LeadsSkipped    int            `json:"leads_skipped"`
+	ScheduledSends  int            `json:"scheduled_sends"`
+	PreviewOnly     bool           `json:"preview_only,omitempty"`
+	WouldReactivate bool           `json:"would_reactivate,omitempty"`
+	Emails          []PlannedEmail `json:"emails,omitempty"`
+	Warnings        []string       `json:"warnings,omitempty"`
+}
+
+// PlannedEmail is an exact rendered email and schedule produced by an
+// add-leads preview transaction.
+type PlannedEmail struct {
+	StepNumber   int      `json:"step_number"`
+	VariantIndex int      `json:"variant_index"`
+	SendAt       string   `json:"send_at"`
+	LeadEmail    string   `json:"lead_email"`
+	AccountEmail string   `json:"account_email"`
+	Subject      string   `json:"subject"`
+	Body         string   `json:"body"`
+	StrippedVars []string `json:"stripped_vars,omitempty"`
+}
+
+// AddLeadsToCampaignOpts controls one cohort added to an existing campaign.
+// Active campaigns whose original start date has arrived require a new explicit
+// StartDate so an import cannot accidentally create immediately-due sends.
+type AddLeadsToCampaignOpts struct {
+	CampaignName string
+	LeadsFile    string
+	LeadsInline  string
+	StartDate    string
+	PreviewOnly  bool
+	Reactivate   bool
 }
 
 // AddLeadsToCampaign adds new leads to an existing campaign and schedules their sends.
 // Pass leadsFile for file path, or leadsInline for inline CSV content (one should be non-empty).
 func AddLeadsToCampaign(db *sql.DB, campaignName, leadsFile, leadsInline string) (*AddLeadsResult, error) {
+	return AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: campaignName,
+		LeadsFile:    leadsFile,
+		LeadsInline:  leadsInline,
+	})
+}
+
+// AddLeadsToCampaignWithOpts adds one dated cohort to an existing campaign.
+func AddLeadsToCampaignWithOpts(db *sql.DB, opts AddLeadsToCampaignOpts) (*AddLeadsResult, error) {
+	campaignName := opts.CampaignName
+	leadsFile := opts.LeadsFile
+	leadsInline := opts.LeadsInline
+
 	// Load campaign
 	var campID int64
-	var seqFile, seqContent, startDate, windowStart, windowEnd, sendDaysStr, tzName string
+	var campaignStatus, seqFile, seqContent, startDate, windowStart, windowEnd, sendDaysStr, tzName string
 	var minGap, maxGap int
-	err := queryRowDB(db, `SELECT id, sequence_file, sequence_content, start_date, send_window_start, send_window_end,
+	err := queryRowDB(db, `SELECT id, status, sequence_file, sequence_content, start_date, send_window_start, send_window_end,
 		send_days, timezone, min_gap_seconds, max_gap_seconds
 		FROM campaigns WHERE name = ?`, campaignName).
-		Scan(&campID, &seqFile, &seqContent, &startDate, &windowStart, &windowEnd, &sendDaysStr, &tzName, &minGap, &maxGap)
+		Scan(&campID, &campaignStatus, &seqFile, &seqContent, &startDate, &windowStart, &windowEnd, &sendDaysStr, &tzName, &minGap, &maxGap)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("campaign %q not found", campaignName)
 	}
@@ -1217,7 +1258,7 @@ func AddLeadsToCampaign(db *sql.DB, campaignName, leadsFile, leadsInline string)
 
 	// Get campaign accounts
 	var accountIDs []int64
-	rows, err := queryDB(db, "SELECT account_id FROM campaign_accounts WHERE campaign_id = ?", campID)
+	rows, err := queryDB(db, "SELECT account_id FROM campaign_accounts WHERE campaign_id = ? ORDER BY account_id", campID)
 	if err != nil {
 		return nil, fmt.Errorf("loading accounts: %w", err)
 	}
@@ -1245,16 +1286,53 @@ func AddLeadsToCampaign(db *sql.DB, campaignName, leadsFile, leadsInline string)
 		return nil, fmt.Errorf("loading timezone: %w", err)
 	}
 
+	wouldReactivate := campaignStatus == "completed" || campaignStatus == "completed_with_failures"
+	effectiveStartDate := strings.TrimSpace(opts.StartDate)
+	if effectiveStartDate != "" {
+		parsedStart, err := time.ParseInLocation("2006-01-02", effectiveStartDate, tz)
+		if err != nil {
+			return nil, fmt.Errorf("invalid start date %q (expected YYYY-MM-DD): %w", effectiveStartDate, err)
+		}
+		localNow := timeNow().In(tz)
+		today := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, tz)
+		if !parsedStart.After(today) {
+			return nil, fmt.Errorf("start date %q must be in the future for an added cohort", effectiveStartDate)
+		}
+	} else {
+		effectiveStartDate = strings.TrimSpace(startDate)
+		if campaignStatus != "draft" && campaignStartDateArrived(effectiveStartDate, timeNow(), tz) {
+			return nil, fmt.Errorf("campaign %q is %s and its start date has arrived; provide --start-date YYYY-MM-DD for the new cohort", campaignName, campaignStatus)
+		}
+	}
+	if wouldReactivate && !opts.Reactivate {
+		return nil, fmt.Errorf("campaign %q is %s; provide --reactivate to add and activate a new cohort", campaignName, campaignStatus)
+	}
+	if opts.Reactivate && campaignStatus != "active" && !wouldReactivate {
+		return nil, fmt.Errorf("campaign %q is %s and cannot be reactivated by add-leads", campaignName, campaignStatus)
+	}
+
 	totalRecords := len(records)
 	type addResult struct {
 		leadsAdded int
 		sendsAdded int
+		emails     []PlannedEmail
 	}
 
-	result, err := withRetryTx(db, func(tx *Tx) (addResult, error) {
+	runAdd := func(tx *Tx) (addResult, error) {
 		var out addResult
+		var previewAfterSendID int64
+		if opts.PreviewOnly {
+			if err := tx.QueryRow("SELECT COALESCE(MAX(id), 0) FROM scheduled_sends").Scan(&previewAfterSendID); err != nil {
+				return out, fmt.Errorf("loading preview boundary: %w", err)
+			}
+		}
+		if wouldReactivate {
+			if _, err := tx.Exec("UPDATE campaigns SET status = 'active' WHERE id = ?", campID); err != nil {
+				return out, fmt.Errorf("reactivating campaign: %w", err)
+			}
+		}
 		added, sends, err := insertLeadsAndSchedule(tx, campID, accountIDs, records, seq,
-			startDate, windowStart, windowEnd, sendDays, tz, minGap, maxGap)
+			effectiveStartDate, windowStart, windowEnd, sendDays, tz, minGap, maxGap)
 		if err != nil {
 			return out, err
 		}
@@ -1263,19 +1341,108 @@ func AddLeadsToCampaign(db *sql.DB, campaignName, leadsFile, leadsInline string)
 		if err := rebalancePendingSchedulesTx(tx, accountIDs); err != nil {
 			return out, err
 		}
+		if opts.PreviewOnly {
+			out.emails, err = loadPlannedEmailsTx(tx, campID, previewAfterSendID, records, seq)
+			if err != nil {
+				return out, err
+			}
+		}
 		return out, nil
-	})
+	}
+
+	var result addResult
+	if opts.PreviewOnly {
+		tx, beginErr := beginTx(db)
+		if beginErr != nil {
+			return nil, fmt.Errorf("starting preview transaction: %w", beginErr)
+		}
+		result, err = runAdd(tx)
+		rollbackErr := tx.Rollback()
+		if err == nil && rollbackErr != nil && rollbackErr != sql.ErrTxDone {
+			err = fmt.Errorf("rolling back preview transaction: %w", rollbackErr)
+		}
+	} else {
+		result, err = withRetryTx(db, runAdd)
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	return &AddLeadsResult{
-		Campaign:       campaignName,
-		LeadsAdded:     result.leadsAdded,
-		LeadsSkipped:   totalRecords - result.leadsAdded,
-		ScheduledSends: result.sendsAdded,
-		Warnings:       addWarnings,
+		Campaign:        campaignName,
+		LeadsAdded:      result.leadsAdded,
+		LeadsSkipped:    totalRecords - result.leadsAdded,
+		ScheduledSends:  result.sendsAdded,
+		PreviewOnly:     opts.PreviewOnly,
+		WouldReactivate: wouldReactivate,
+		Emails:          result.emails,
+		Warnings:        addWarnings,
 	}, nil
+}
+
+func loadPlannedEmailsTx(tx *Tx, campaignID, afterSendID int64, records []LeadRecord, seq *Sequence) ([]PlannedEmail, error) {
+	fieldsByEmail := make(map[string]map[string]string, len(records))
+	emails := make([]string, 0, len(records))
+	for _, record := range records {
+		email := strings.ToLower(strings.TrimSpace(record.Fields["email"]))
+		if _, exists := fieldsByEmail[email]; exists {
+			continue
+		}
+		fieldsByEmail[email] = record.Fields
+		emails = append(emails, email)
+	}
+	if len(emails) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(emails))
+	args := make([]any, 0, len(emails)+2)
+	args = append(args, campaignID, afterSendID)
+	for index, email := range emails {
+		placeholders[index] = "?"
+		args = append(args, email)
+	}
+	rows, err := tx.Query(fmt.Sprintf(`
+		SELECT ss.step_number, ss.variant_index, CAST(ss.send_at AS TEXT), LOWER(l.email), a.email
+		FROM scheduled_sends ss
+		JOIN leads l ON l.id = ss.lead_id
+		JOIN accounts a ON a.id = ss.account_id
+		WHERE ss.campaign_id = ? AND ss.id > ? AND LOWER(l.email) IN (%s)
+		ORDER BY ss.send_at, l.email, ss.step_number`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("loading planned emails: %w", err)
+	}
+	defer rows.Close()
+
+	var planned []PlannedEmail
+	for rows.Next() {
+		var item PlannedEmail
+		if err := rows.Scan(&item.StepNumber, &item.VariantIndex, &item.SendAt, &item.LeadEmail, &item.AccountEmail); err != nil {
+			return nil, fmt.Errorf("scanning planned email: %w", err)
+		}
+		params := BuildEmailForSend(seq, item.StepNumber, item.VariantIndex, fieldsByEmail[item.LeadEmail], item.AccountEmail)
+		item.Subject = params.Subject
+		item.Body = params.Body
+		item.StrippedVars = params.StrippedVars
+		planned = append(planned, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading planned emails: %w", err)
+	}
+	return planned, nil
+}
+
+func campaignStartDateArrived(startDate string, now time.Time, tz *time.Location) bool {
+	if strings.TrimSpace(startDate) == "" {
+		return true
+	}
+	start, err := time.ParseInLocation("2006-01-02", startDate, tz)
+	if err != nil {
+		return true
+	}
+	localNow := now.In(tz)
+	today := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, tz)
+	return !start.After(today)
 }
 
 // insertLeadsAndSchedule is the shared logic for creating leads and their scheduled sends.
@@ -1360,7 +1527,7 @@ func insertLeadsAndSchedule(tx *Tx, campaignID int64, accountIDs []int64,
 		Timezone:        tz,
 		MinGapSeconds:   minGap,
 		MaxGapSeconds:   maxGap,
-		StartTime:       time.Now().In(tz),
+		StartTime:       timeNow().In(tz),
 	})
 	if err != nil {
 		return 0, 0, fmt.Errorf("computing schedule: %w", err)

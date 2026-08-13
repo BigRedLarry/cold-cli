@@ -168,7 +168,7 @@ cold-cli --workspace workspace-a campaign preflight --leads <csv>
 cold-cli --workspace workspace-a campaign create --name --sequence --leads --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
 cold-cli --workspace workspace-a campaign create --name --sequence-inline '...' --leads-inline '...' --accounts  # no files needed
 cold-cli campaign clone <source> --name <new> --leads <csv> [--start-date YYYY-MM-DD]
-cold-cli campaign add-leads <name|id> --leads <csv>    # or --leads-inline '...'
+cold-cli campaign add-leads <name|id> --leads <csv> [--start-date YYYY-MM-DD] [--preview-only] [--reactivate]
 cold-cli campaign remove-lead <name|id> <email>        # remove one lead from a campaign
 cold-cli campaign preview <name|id>        # see full schedule before activating
 cold-cli campaign preview <name|id> --render  # see rendered emails for first lead, with stripped-var warnings
@@ -569,10 +569,18 @@ Add more leads to a running campaign:
 ```bash
 cold-cli campaign validate-leads --leads more-leads.csv
 cold-cli campaign preflight --leads more-leads.csv
-cold-cli campaign add-leads q1-outreach --leads more-leads.csv
+cold-cli campaign add-leads q1-outreach --leads more-leads.csv --start-date 2026-09-08 --preview-only
+cold-cli campaign add-leads q1-outreach --leads more-leads.csv --start-date 2026-09-08
 ```
 
 Automatically skips leads already in the campaign, blacklisted, or bounced.
+`--preview-only` performs the same insert, account assignment, shared schedule
+rebalance and template rendering inside a transaction that is always rolled
+back. It returns exact sender, recipient, subject, body and send time without
+saving a lead or send. Once an active campaign's stored start date has arrived,
+an explicit future `--start-date` is required for every added cohort. A
+completed campaign also requires `--reactivate`; include it in the rollback
+preview before using it on the real add.
 
 For mixed geographies, you can either:
 - use one campaign with per-lead `schedule_timezone` when the same local window is acceptable for everyone
