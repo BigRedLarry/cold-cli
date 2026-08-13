@@ -1189,7 +1189,7 @@ var campaignDeleteCmd = &cobra.Command{
 var campaignUpdateCmd = &cobra.Command{
 	Use:   "update <name|id>",
 	Short: "Update campaign settings (sequence, send window, days, gaps)",
-	Long:  "Update campaign-level settings such as sequence, send window, send days, timezone, and gaps. Lead-level schedule_timezone overrides from CSV remain lead-specific and are not changed by this command.",
+	Long:  "Update campaign-level settings such as sequence, start date, send window, send days, timezone, and gaps. Lead-level schedule_timezone overrides from CSV remain lead-specific and are not changed by this command.",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
@@ -1205,6 +1205,12 @@ var campaignUpdateCmd = &cobra.Command{
 
 		opts := internal.UpdateCampaignOpts{}
 		changed := false
+
+		if cmd.Flags().Changed("start-date") {
+			v, _ := cmd.Flags().GetString("start-date")
+			opts.StartDate = &v
+			changed = true
+		}
 
 		if cmd.Flags().Changed("send-window-start") {
 			v, _ := cmd.Flags().GetString("send-window-start")
@@ -1269,6 +1275,7 @@ var campaignCloneCmd = &cobra.Command{
 		leadsFile, _ := cmd.Flags().GetString("leads")
 		leadsInline, _ := cmd.Flags().GetString("leads-inline")
 		accountsFlag, _ := cmd.Flags().GetString("accounts")
+		startDate, _ := cmd.Flags().GetString("start-date")
 
 		if name == "" {
 			return fmt.Errorf("required flag: --name")
@@ -1300,6 +1307,7 @@ var campaignCloneCmd = &cobra.Command{
 			LeadsFile:   leadsFile,
 			LeadsInline: leadsInline,
 			Accounts:    accounts,
+			StartDate:   startDate,
 		})
 		if err != nil {
 			return err
@@ -1426,6 +1434,108 @@ var campaignValidateLeadsCmd = &cobra.Command{
 
 		if result.HasBlockingRows() && !noStrictExit {
 			return fmt.Errorf("lead email validation did not pass: %d manual review, %d failed", result.ManualReview, result.Fail)
+		}
+		return nil
+	},
+}
+
+var campaignPreflightCmd = &cobra.Command{
+	Use:   "preflight",
+	Short: "Check candidate leads before campaign import",
+	Long: strings.TrimSpace(`
+Run one read-only gate before campaign create, clone, or add-leads. The gate
+checks duplicate emails, duplicate company email domains, prior campaign
+history, global suppressions, MX records, and SMTP recipient status.
+
+History is checked across all workspaces by default. Use --history-scope
+workspace only when cross-project contact history is intentionally irrelevant.
+Use --allow-same-domain only after deciding that multiple contacts at one
+company are appropriate. The command never creates or sends anything.
+`),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		leadsFile, _ := cmd.Flags().GetString("leads")
+		leadsInline, _ := cmd.Flags().GetString("leads-inline")
+		historyScope, _ := cmd.Flags().GetString("history-scope")
+		allowSameDomain, _ := cmd.Flags().GetBool("allow-same-domain")
+		skipEmailValidation, _ := cmd.Flags().GetBool("skip-email-validation")
+		allowFreeEmail, _ := cmd.Flags().GetBool("allow-free-email")
+		allowCatchAll, _ := cmd.Flags().GetBool("allow-catch-all")
+		allowUnknown, _ := cmd.Flags().GetBool("allow-unknown")
+		noStrictExit, _ := cmd.Flags().GetBool("no-strict-exit")
+		timeoutSeconds, _ := cmd.Flags().GetInt("timeout")
+
+		if leadsFile == "" && leadsInline == "" {
+			return fmt.Errorf("provide --leads (file path) or --leads-inline (CSV content)")
+		}
+		if timeoutSeconds < 1 {
+			return fmt.Errorf("--timeout must be at least 1 second")
+		}
+		var records []internal.LeadRecord
+		var err error
+		if leadsInline != "" {
+			records, _, err = internal.ParseLeadsCSVFromReader(strings.NewReader(leadsInline))
+		} else {
+			records, _, err = internal.ParseLeadsCSV(leadsFile)
+		}
+		if err != nil {
+			return err
+		}
+		db, err := openDB()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		result, err := internal.PreflightCampaignLeads(internal.CampaignPreflightConfig{
+			DB: db, WorkspaceID: currentWorkspaceID(), HistoryScope: historyScope,
+			CheckDomains: !allowSameDomain, Records: records,
+			SkipEmailValidation: skipEmailValidation,
+			ValidationPolicy: internal.EmailValidationPolicy{
+				AllowFreeEmail: allowFreeEmail, AllowCatchAll: allowCatchAll,
+				AllowUnknown: allowUnknown, Timeout: time.Duration(timeoutSeconds) * time.Second,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			if err := printJSON(result); err != nil {
+				return err
+			}
+		} else {
+			fmt.Println("Campaign lead preflight")
+			fmt.Printf("  history_scope:  %s\n", result.HistoryScope)
+			fmt.Printf("  domain_checks:  %t\n", result.CheckDomains)
+			fmt.Printf("  email_checks:   %t\n", result.EmailChecks)
+			fmt.Printf("  checked:        %d\n", result.Checked)
+			fmt.Printf("  ready:          %d\n", result.Ready)
+			fmt.Printf("  manual_review:  %d\n", result.ManualReview)
+			fmt.Printf("  blocked:        %d\n", result.Blocked)
+			for _, row := range result.Rows {
+				if row.Status == internal.CampaignPreflightReady {
+					continue
+				}
+				fmt.Printf("  - %s %s", row.Status, row.Email)
+				if row.SMTPStatus != "" {
+					fmt.Printf(" (%s)", row.SMTPStatus)
+				}
+				fmt.Println()
+				for _, reason := range row.Reasons {
+					fmt.Printf("      %s\n", reason)
+				}
+				for _, match := range row.History {
+					if match.CampaignID == 0 {
+						fmt.Printf("      history %s: %s (%s)\n", match.MatchType, match.LeadEmail, match.LeadGlobalStatus)
+						continue
+					}
+					fmt.Printf("      history %s: %s campaign=%s/%s id=%d status=%s\n",
+						match.MatchType, match.LeadEmail, match.WorkspaceID, match.CampaignName,
+						match.CampaignID, match.CampaignStatus)
+				}
+			}
+		}
+		if result.HasBlockingRows() && !noStrictExit {
+			return fmt.Errorf("campaign preflight did not pass: %d manual review, %d blocked", result.ManualReview, result.Blocked)
 		}
 		return nil
 	},
@@ -2173,6 +2283,67 @@ second audit, and then list candidates. This command never drafts or sends.
 	},
 }
 
+var inboxNeedsReplyCmd = &cobra.Command{
+	Use:   "needs-reply",
+	Short: "List provider-verified threads whose latest message is inbound",
+	Long: strings.TrimSpace(`
+Audit provider campaign threads before listing conversations whose newest
+message is a human inbound reply. Results are ordered oldest first so missed
+replies are visible.
+
+The command is read-only by default and fails closed when provider messages are
+missing. Use --reconcile to import provider-confirmed messages, verify a clean
+second audit, and then list candidates. It never drafts or sends email.
+`),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sinceValue, _ := cmd.Flags().GetString("since")
+		campaignID, _ := cmd.Flags().GetInt64("campaign")
+		limit, _ := cmd.Flags().GetInt("limit")
+		reconcile, _ := cmd.Flags().GetBool("reconcile")
+		showThread, _ := cmd.Flags().GetBool("show-thread")
+		since, err := parseBackfillSince(sinceValue)
+		if err != nil {
+			return err
+		}
+		if campaignID < 0 {
+			return fmt.Errorf("--campaign must be a positive integer")
+		}
+		store, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if reconcile {
+			lock, err := store.AcquireTickLock(context.Background())
+			if err != nil {
+				return fmt.Errorf("provider reconciliation requires the tick lock: %w", err)
+			}
+			defer lock.Close()
+		}
+		result, reviewErr := internal.ReviewNeedsReplyCandidates(internal.NeedsReplyCandidatesConfig{
+			DB: store.DB, WorkspaceID: currentWorkspaceID(), CampaignID: campaignID,
+			Since: since, Now: time.Now().UTC(), Limit: limit, IncludeThread: showThread,
+			Reconcile: reconcile, SecretResolver: internal.EnvSecretResolver{},
+			GWS: configuredGWSClient(store),
+		})
+		if jsonOutput {
+			if err := printJSON(result); err != nil {
+				return err
+			}
+			return reviewErr
+		}
+		if result != nil && result.Audit != nil {
+			fmt.Printf("Provider audit: scanned %d, matched %d, missing %d across %d accounts\n",
+				result.Audit.Scanned, result.Audit.Matched, result.Audit.Missing, len(result.Audit.Accounts))
+		}
+		if reviewErr != nil {
+			return reviewErr
+		}
+		printNeedsReplyCandidates(result.Candidates, showThread)
+		return nil
+	},
+}
+
 var inboxShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Refresh and print one complete stored thread",
@@ -2180,6 +2351,7 @@ var inboxShowCmd = &cobra.Command{
 		campaignID, _ := cmd.Flags().GetInt64("campaign")
 		leadID, _ := cmd.Flags().GetInt64("lead")
 		threadID, _ := cmd.Flags().GetString("thread")
+		requestedThreadID := strings.TrimSpace(threadID)
 		limit, _ := cmd.Flags().GetInt("limit")
 		storedOnly, _ := cmd.Flags().GetBool("stored-only")
 		if campaignID < 1 {
@@ -2202,7 +2374,9 @@ var inboxShowCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			threadID = result.ThreadID
+			if requestedThreadID != "" {
+				threadID = result.ThreadID
+			}
 		}
 		messages, err := internal.ListEmailThreadMessages(store.DB, internal.ListEmailThreadMessagesOpts{
 			CampaignID: campaignID, LeadID: leadID, ThreadID: threadID, Limit: limit,
@@ -2277,6 +2451,40 @@ func printFollowupCandidates(candidates []internal.FollowupCandidate, showThread
 			candidate.ReplyCount, candidate.FollowupCount)
 		fmt.Printf("Last inbound from %s:\n%s\n", candidate.LastInboundFrom, strings.TrimSpace(candidate.LastInboundBody))
 		fmt.Printf("Our last response:\n%s\n", strings.TrimSpace(candidate.LastOutboundBody))
+		fmt.Printf("Review: cold-cli --workspace %s inbox show --campaign %d --lead %d\n",
+			currentWorkspaceID(), candidate.CampaignID, candidate.LeadID)
+		if showThread {
+			fmt.Printf("Thread (%d messages):\n", len(candidate.Thread))
+			for index, message := range candidate.Thread {
+				fmt.Printf("  --- %d/%d %s %s ---\n", index+1, len(candidate.Thread), strings.ToUpper(message.Direction), message.OccurredAt.UTC().Format(time.RFC3339))
+				fmt.Printf("  From: %s\n  To: %s\n  Subject: %s\n\n%s\n",
+					message.FromEmail, message.ToEmails, message.Subject, strings.TrimSpace(message.Body))
+			}
+		}
+	}
+}
+
+func printNeedsReplyCandidates(candidates []internal.NeedsReplyCandidate, showThread bool) {
+	if len(candidates) == 0 {
+		fmt.Println("No provider-verified threads are awaiting a human response.")
+		return
+	}
+	fmt.Printf("%d provider-verified threads have a latest inbound reply:\n", len(candidates))
+	fmt.Println("Structural shortlist only. Read the full thread and mark no-response-needed conversations before drafting.")
+	for _, candidate := range candidates {
+		fmt.Printf("\n#%d campaign=%d lead=%d ", candidate.Rank, candidate.CampaignID, candidate.LeadID)
+		if candidate.Company != "" {
+			fmt.Printf("%s", candidate.Company)
+		} else {
+			fmt.Printf("%s", candidate.LeadEmail)
+		}
+		fmt.Printf("\nFrom: %s\nTo: %s\nSubject: %s\n", candidate.FromEmail, candidate.ToEmail, candidate.Subject)
+		fmt.Printf("Latest inbound: %s (%d hours ago) from %s\n%s\n",
+			candidate.LastInboundAt.UTC().Format(time.RFC3339), candidate.AgeHours,
+			candidate.LastInboundFrom, strings.TrimSpace(candidate.LastInboundBody))
+		if candidate.PreviousOutboundBody != "" {
+			fmt.Printf("Previous outbound:\n%s\n", strings.TrimSpace(candidate.PreviousOutboundBody))
+		}
 		fmt.Printf("Review: cold-cli --workspace %s inbox show --campaign %d --lead %d\n",
 			currentWorkspaceID(), candidate.CampaignID, candidate.LeadID)
 		if showThread {
@@ -2624,6 +2832,7 @@ func init() {
 	campaignPreviewCmd.Flags().Bool("render", false, "show rendered email content with templates filled in, including stripped placeholder warnings")
 	campaignPreviewCmd.Flags().String("lead", "", "show rendered preview for a specific lead email (use with --render)")
 	campaignUpdateCmd.Flags().String("sequence", "", "path to new sequence YAML file")
+	campaignUpdateCmd.Flags().String("start-date", "", "start date (YYYY-MM-DD); empty clears the stored start date")
 	campaignUpdateCmd.Flags().String("send-window-start", "", "send window start (HH:MM)")
 	campaignUpdateCmd.Flags().String("send-window-end", "", "send window end (HH:MM)")
 	campaignUpdateCmd.Flags().String("send-days", "", "send days: numbers (0=Sun,1=Mon,...,6=Sat) or names (mon,tue,wed)")
@@ -2634,6 +2843,7 @@ func init() {
 	campaignCloneCmd.Flags().String("leads", "", "path to leads CSV file (optional per-lead schedule_timezone column supported)")
 	campaignCloneCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads; optional per-lead schedule_timezone column supported)")
 	campaignCloneCmd.Flags().String("accounts", "", "comma-separated account emails (default: reuse source accounts)")
+	campaignCloneCmd.Flags().String("start-date", "", "start date (YYYY-MM-DD); default: schedule from now")
 	campaignAddLeadsCmd.Flags().String("leads", "", "path to leads CSV file (optional per-lead schedule_timezone column supported)")
 	campaignAddLeadsCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads; optional per-lead schedule_timezone column supported)")
 	campaignValidateLeadsCmd.Flags().String("leads", "", "path to leads CSV file")
@@ -2643,9 +2853,19 @@ func init() {
 	campaignValidateLeadsCmd.Flags().Bool("allow-unknown", false, "allow inconclusive SMTP checks to pass")
 	campaignValidateLeadsCmd.Flags().Bool("no-strict-exit", false, "exit 0 even when rows require manual review or fail")
 	campaignValidateLeadsCmd.Flags().Int("timeout", 10, "SMTP connection/command timeout in seconds")
+	campaignPreflightCmd.Flags().String("leads", "", "path to leads CSV file")
+	campaignPreflightCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads)")
+	campaignPreflightCmd.Flags().String("history-scope", "all", "prior campaign scope: all or workspace")
+	campaignPreflightCmd.Flags().Bool("allow-same-domain", false, "do not block multiple or previously seen recipients at the same company email domain")
+	campaignPreflightCmd.Flags().Bool("skip-email-validation", false, "run duplicate, history, and suppression checks without MX/SMTP checks")
+	campaignPreflightCmd.Flags().Bool("allow-free-email", false, "allow Gmail/free-mail recipients even though exact mailboxes are not SMTP-verified")
+	campaignPreflightCmd.Flags().Bool("allow-catch-all", false, "allow catch-all domains even though exact mailboxes are not verified")
+	campaignPreflightCmd.Flags().Bool("allow-unknown", false, "allow inconclusive SMTP checks")
+	campaignPreflightCmd.Flags().Bool("no-strict-exit", false, "exit 0 even when rows require manual review or are blocked")
+	campaignPreflightCmd.Flags().Int("timeout", 10, "SMTP connection/command timeout in seconds")
 	campaignRetryCmd.Flags().Int("step", 0, "only retry failed sends for this step number")
 	campaignActivateCmd.Flags().Bool("send-now", false, "set all pending sends to now so they send immediately")
-	campaignCmd.AddCommand(campaignCreateCmd, campaignListCmd, campaignPreviewCmd, campaignActivateCmd, campaignPauseCmd, campaignResumeCmd, campaignStatusCmd, campaignDeleteCmd, campaignRemoveLeadCmd, campaignUpdateCmd, campaignCloneCmd, campaignAddLeadsCmd, campaignValidateLeadsCmd, campaignInitCmd, campaignRetryCmd, campaignSendNowCmd)
+	campaignCmd.AddCommand(campaignCreateCmd, campaignListCmd, campaignPreviewCmd, campaignActivateCmd, campaignPauseCmd, campaignResumeCmd, campaignStatusCmd, campaignDeleteCmd, campaignRemoveLeadCmd, campaignUpdateCmd, campaignCloneCmd, campaignAddLeadsCmd, campaignValidateLeadsCmd, campaignPreflightCmd, campaignInitCmd, campaignRetryCmd, campaignSendNowCmd)
 
 	tickCmd.Flags().Bool("dry-run", false, "show what would be sent without actually sending")
 	tickCmd.Flags().Bool("now", false, "ignore send_at timestamps and send all pending emails immediately")
@@ -2682,9 +2902,14 @@ func init() {
 	inboxFollowupsCmd.Flags().Int("limit", 20, "maximum candidates to return")
 	inboxFollowupsCmd.Flags().Bool("reconcile", false, "import provider-confirmed missing messages and verify clean state before listing")
 	inboxFollowupsCmd.Flags().Bool("show-thread", false, "print each candidate's complete stored thread")
+	inboxNeedsReplyCmd.Flags().String("since", "120d", "earliest provider message date (YYYY-MM-DD, RFC3339, or duration like 30d)")
+	inboxNeedsReplyCmd.Flags().Int64("campaign", 0, "only list candidates from this campaign ID")
+	inboxNeedsReplyCmd.Flags().Int("limit", 50, "maximum candidates to return")
+	inboxNeedsReplyCmd.Flags().Bool("reconcile", false, "import provider-confirmed missing messages and verify clean state before listing")
+	inboxNeedsReplyCmd.Flags().Bool("show-thread", false, "print each candidate's complete stored thread")
 	inboxShowCmd.Flags().Int("limit", 100, "maximum stored messages to print")
 	inboxShowCmd.Flags().Bool("stored-only", false, "print stored snapshots without refreshing the provider")
-	inboxCmd.AddCommand(inboxBackfillCmd, inboxReplyCmd, inboxSyncCmd, inboxShowCmd, inboxAuditCmd, inboxReconcileCmd, inboxFollowupsCmd)
+	inboxCmd.AddCommand(inboxBackfillCmd, inboxReplyCmd, inboxSyncCmd, inboxShowCmd, inboxAuditCmd, inboxReconcileCmd, inboxFollowupsCmd, inboxNeedsReplyCmd)
 
 	statsCmd.Flags().Bool("leads", false, "show per-lead breakdown")
 	statsCmd.Flags().Bool("variants", false, "show per-variant A/B test results")

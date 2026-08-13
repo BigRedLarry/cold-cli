@@ -226,13 +226,13 @@ func TestCLI_InboxReplyPreviewsByDefaultAndRequiresRecipientConfirmation(t *test
 	}
 }
 
-func TestCLI_InboxFollowupsAndReconcileAreDiscoverable(t *testing.T) {
+func TestCLI_InboxReviewCommandsAreDiscoverable(t *testing.T) {
 	bin, env, _ := setupTestEnv(t)
 	out, code := runCLI(t, bin, env, "inbox", "--help")
 	if code != 0 {
 		t.Fatalf("inbox help failed (exit %d): %s", code, out)
 	}
-	for _, expected := range []string{"followups", "reconcile"} {
+	for _, expected := range []string{"followups", "needs-reply", "reconcile"} {
 		if !strings.Contains(out, expected) {
 			t.Fatalf("inbox help missing %q:\n%s", expected, out)
 		}
@@ -245,6 +245,29 @@ func TestCLI_InboxFollowupsAndReconcileAreDiscoverable(t *testing.T) {
 	for _, expected := range []string{"--reconcile", "--min-age", "--max-followups", "never drafts or sends"} {
 		if !strings.Contains(out, expected) {
 			t.Fatalf("followups help missing %q:\n%s", expected, out)
+		}
+	}
+
+	out, code = runCLI(t, bin, env, "inbox", "needs-reply", "--help")
+	if code != 0 {
+		t.Fatalf("needs-reply help failed (exit %d): %s", code, out)
+	}
+	for _, expected := range []string{"--reconcile", "--show-thread", "never drafts or sends"} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("needs-reply help missing %q:\n%s", expected, out)
+		}
+	}
+}
+
+func TestCLI_CampaignPreflightIsDiscoverable(t *testing.T) {
+	bin, env, _ := setupTestEnv(t)
+	out, code := runCLI(t, bin, env, "campaign", "preflight", "--help")
+	if code != 0 {
+		t.Fatalf("campaign preflight help failed (exit %d): %s", code, out)
+	}
+	for _, expected := range []string{"--history-scope", "--allow-same-domain", "--skip-email-validation", "never creates or sends"} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("campaign preflight help missing %q:\n%s", expected, out)
 		}
 	}
 }

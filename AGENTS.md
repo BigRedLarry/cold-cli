@@ -28,9 +28,11 @@ internal/                 — single flat package, all application logic
   csv.go                  — lead CSV import, BOM stripping, field validation
   config.go               — YAML config loading
   campaign.go             — campaign CRUD, preview, rendered preview, daily limit warnings
+  campaign_preflight.go   — read-only duplicate/history/suppression/recipient gate
   account.go              — account CRUD, update, domain diagnostics
   lead.go                 — lead pause/resume/blacklist/list, campaign remove-lead
   stats.go                — campaign/step/variant/lead stats, event log
+  inbox_needs_reply.go    — provider-verified latest-inbound reply review queue
 ```
 
 ## Key Design Decisions
@@ -40,7 +42,7 @@ These are settled — do not revisit without explicit instruction:
 1. **Eager scheduling** — all sends stored in `scheduled_sends`; then deterministically rebalanced across active/draft campaigns sharing an account. Do NOT use lazy/rolling `next_send_at` on campaign_leads.
 2. **GWSClient interface** — gws interaction goes through an interface (`SendEmail`, `ListMessages`). Real impl calls subprocess. Tests use a mock.
 3. **Template rendering** — `strings.ReplaceAll` for `{{placeholder}}` substitution with alias resolution (`name` → `first_name`, etc.). Unresolved variables stripped at send time (not sent literally). No Go `text/template`. No template engine.
-4. **Daily limits** — count from events table (`SELECT COUNT(*) ... WHERE type='sent' AND timestamp >= today`) and apply them through shared rebalance logic used by preview, warnings, and tick. No mutable `sends_today` counter on accounts.
+4. **Daily limits and gaps** — count from events table (`SELECT COUNT(*) ... WHERE type='sent' AND timestamp >= today`) and apply limits through shared rebalance logic used by preview, warnings, and tick. The same rebalancer enforces campaign minimum gaps across pending sends sharing an account, including per-lead timezone schedules. No mutable `sends_today` counter on accounts.
 5. **Account rotation** — round-robin at schedule time. All steps for one lead use the same account (thread continuity).
 6. **Thread management** — after step 1 send, backfill `thread_id` and `parent_message_id` onto all remaining `scheduled_sends` for that lead+campaign.
 7. **Error isolation** — gws send failure marks that one `scheduled_sends` row as `'failed'` and continues. Never crash the whole tick. Emails with empty subject/body after rendering are also marked `failed` (not sent).
@@ -49,6 +51,8 @@ These are settled — do not revisit without explicit instruction:
 10. **Tick locking** — SQLite mode uses flock/fcntl on `~/.cold-cli/tick.lock`; Postgres mode uses an advisory lock on a dedicated connection. Keep the semantics aligned.
 11. **Validation at creation** — template placeholders validated against lead CSV at campaign creation with alias resolution and Levenshtein "Did you mean?" suggestions. Unresolved vars stripped at send time as a safety net.
 12. **Workspace ownership** — `cold-cli` is the source of truth for account/campaign ownership. Accounts and campaigns carry `workspace_id`, defaulting to `default` for backward compatibility; there is no separate app-side account mapping to maintain. Use `--workspace <id>` or `COLD_CLI_WORKSPACE_ID` when adding inboxes or campaigns for hosted/multi-brand setups; do not rely on email-domain inference as the access boundary. For hosted dashboards or multi-tenant control planes, always pass the intended workspace explicitly so campaigns do not accidentally land in `default`.
+13. **Preflight history defaults global** — `campaign preflight` checks prior email and company-domain campaign history across every workspace by default. Workspace ownership controls access and sending, but it is not a contact-reuse boundary. Narrowing history scope or allowing a shared domain must be explicit.
+14. **Provider state gates reply queues** — both `inbox needs-reply` and `inbox followups` audit provider history before returning candidates. They fail closed on missing messages and never draft or send.
 
 ## Testing
 

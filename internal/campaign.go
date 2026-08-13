@@ -926,22 +926,18 @@ func ListCampaignsForWorkspace(db *sql.DB, workspaceID string) ([]CampaignListRo
 
 // FormatSendDays converts "1,2,3,4,5" to "Mon-Fri" or similar human-readable format.
 func FormatSendDays(s string) string {
-	dayNames := map[string]string{
-		"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed",
-		"4": "Thu", "5": "Fri", "6": "Sat",
+	days, err := ParseSendDays(s)
+	if err != nil {
+		return ""
 	}
-	parts := strings.Split(s, ",")
-	var names []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if name, ok := dayNames[p]; ok {
-			names = append(names, name)
-		}
+	dayNames := [...]string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+	names := make([]string, 0, len(days))
+	for _, day := range days {
+		names = append(names, dayNames[day])
 	}
 
 	// Detect common ranges
 	if len(names) > 2 {
-		days, _ := ParseSendDays(s)
 		if isContiguousRange(days) {
 			return names[0] + "-" + names[len(names)-1]
 		}
@@ -996,6 +992,7 @@ type CloneCampaignOpts struct {
 	LeadsFile   string
 	LeadsInline string   // inline CSV content (alternative to LeadsFile)
 	Accounts    []string // optional: override accounts; empty = reuse source accounts
+	StartDate   string   // optional "YYYY-MM-DD"; empty = now
 }
 
 // CloneCampaign creates a new campaign by copying settings from an existing one with new leads.
@@ -1095,6 +1092,11 @@ func CloneCampaign(db *sql.DB, opts CloneCampaignOpts) (*CreateCampaignResult, e
 	if err != nil {
 		return nil, fmt.Errorf("loading timezone: %w", err)
 	}
+	if opts.StartDate != "" {
+		if _, err := time.ParseInLocation("2006-01-02", opts.StartDate, tz); err != nil {
+			return nil, fmt.Errorf("invalid start date %q (expected YYYY-MM-DD): %w", opts.StartDate, err)
+		}
+	}
 
 	type cloneResult struct {
 		campaignID int64
@@ -1108,8 +1110,8 @@ func CloneCampaign(db *sql.DB, opts CloneCampaignOpts) (*CreateCampaignResult, e
 		err := tx.QueryRow(`
 			INSERT INTO campaigns (workspace_id, name, status, sequence_file, sequence_content, start_date, stop_on_reply, stop_on_domain_reply,
 				send_window_start, send_window_end, send_days, timezone, min_gap_seconds, max_gap_seconds)
-			VALUES (?, ?, 'draft', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-			workspaceID, opts.NewName, src.SeqFile, src.SeqContent, src.StopOnReply, src.StopOnDomain,
+			VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			workspaceID, opts.NewName, src.SeqFile, src.SeqContent, opts.StartDate, src.StopOnReply, src.StopOnDomain,
 			src.WindowStart, src.WindowEnd, src.SendDays, src.Timezone, src.MinGap, src.MaxGap,
 		).Scan(&out.campaignID)
 		if err != nil {
@@ -1126,7 +1128,7 @@ func CloneCampaign(db *sql.DB, opts CloneCampaignOpts) (*CreateCampaignResult, e
 		}
 
 		added, sends, err := insertLeadsAndSchedule(tx, out.campaignID, accountIDs, records, seq,
-			"", src.WindowStart, src.WindowEnd, sendDays, tz, src.MinGap, src.MaxGap)
+			opts.StartDate, src.WindowStart, src.WindowEnd, sendDays, tz, src.MinGap, src.MaxGap)
 		if err != nil {
 			return out, err
 		}
@@ -1667,6 +1669,7 @@ func RetryCampaign(db *sql.DB, name string, step *int) (*RetryCampaignResult, er
 
 // UpdateCampaignOpts holds fields to update. Zero values are ignored.
 type UpdateCampaignOpts struct {
+	StartDate       *string
 	SendWindowStart *string
 	SendWindowEnd   *string
 	SendDays        *string
@@ -1679,6 +1682,11 @@ type UpdateCampaignOpts struct {
 // UpdateCampaign updates campaign settings with validation.
 func UpdateCampaign(db *sql.DB, name string, opts UpdateCampaignOpts) error {
 	// Validate inputs before touching the database
+	if opts.StartDate != nil && *opts.StartDate != "" {
+		if _, err := time.Parse("2006-01-02", *opts.StartDate); err != nil {
+			return fmt.Errorf("invalid start date %q (expected YYYY-MM-DD): %w", *opts.StartDate, err)
+		}
+	}
 	if opts.Timezone != nil {
 		if _, err := time.LoadLocation(*opts.Timezone); err != nil {
 			return fmt.Errorf("invalid timezone %q: %w", *opts.Timezone, err)
@@ -1770,7 +1778,12 @@ func UpdateCampaign(db *sql.DB, name string, opts UpdateCampaignOpts) error {
 		effectiveTimezoneName = *opts.Timezone
 	}
 
-	shouldReschedulePending := opts.SendWindowStart != nil || opts.SendWindowEnd != nil || opts.SendDays != nil || opts.Timezone != nil
+	effectiveStartDate := current.StartDate
+	if opts.StartDate != nil {
+		effectiveStartDate = *opts.StartDate
+	}
+
+	shouldReschedulePending := opts.StartDate != nil || opts.SendWindowStart != nil || opts.SendWindowEnd != nil || opts.SendDays != nil || opts.Timezone != nil
 	hasPendingSends := false
 	if shouldReschedulePending {
 		var pendingCount int
@@ -1811,6 +1824,12 @@ func UpdateCampaign(db *sql.DB, name string, opts UpdateCampaignOpts) error {
 		col string
 		val any
 	}{}
+	if opts.StartDate != nil {
+		updates = append(updates, struct {
+			col string
+			val any
+		}{"start_date", *opts.StartDate})
+	}
 	if opts.SendWindowStart != nil {
 		updates = append(updates, struct {
 			col string
@@ -1867,7 +1886,7 @@ func UpdateCampaign(db *sql.DB, name string, opts UpdateCampaignOpts) error {
 
 		if shouldReschedulePending && hasPendingSends {
 			if err := reschedulePendingSends(tx, current.ID, effectiveSeq,
-				current.StartDate, effectiveWindowStart, effectiveWindowEnd, effectiveSendDays, effectiveTimezone); err != nil {
+				effectiveStartDate, effectiveWindowStart, effectiveWindowEnd, effectiveSendDays, effectiveTimezone); err != nil {
 				return struct{}{}, fmt.Errorf("rescheduling pending sends: %w", err)
 			}
 		}

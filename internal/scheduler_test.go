@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -800,6 +801,66 @@ steps:
 	}
 }
 
+func TestRebalancePendingSchedules_EnforcesMinimumGapAcrossLeadTimezones(t *testing.T) {
+	db := testDB(t)
+
+	seqYAML := `name: Test
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi"
+    body: "Step 1"
+`
+
+	db.Exec("INSERT INTO accounts (id, email, daily_limit) VALUES (1, 'sender@x.com', 10)")
+	db.Exec(`INSERT INTO campaigns (id, name, status, sequence_file, sequence_content, start_date,
+		send_window_start, send_window_end, send_days, timezone, min_gap_seconds, max_gap_seconds)
+		VALUES (1, 'campaign-a', 'draft', 'seq.yml', ?, '2026-08-18',
+		'09:00', '11:00', 'tue,wed,thu', 'Europe/Berlin', 900, 1800)`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+	db.Exec(`INSERT INTO leads (id, email, custom_fields)
+		VALUES (1, 'dublin@x.com', '{"schedule_timezone":"Europe/Dublin"}')`)
+	db.Exec(`INSERT INTO leads (id, email, custom_fields)
+		VALUES (2, 'london@x.com', '{"schedule_timezone":"Europe/London"}')`)
+	db.Exec("INSERT INTO campaign_leads (campaign_id, lead_id, status) VALUES (1, 1, 'active')")
+	db.Exec("INSERT INTO campaign_leads (campaign_id, lead_id, status) VALUES (1, 2, 'active')")
+	db.Exec(`INSERT INTO scheduled_sends (id, campaign_id, lead_id, account_id, step_number, send_at, status)
+		VALUES (1, 1, 1, 1, 1, '2026-08-18T08:00:00Z', 'pending')`)
+	db.Exec(`INSERT INTO scheduled_sends (id, campaign_id, lead_id, account_id, step_number, send_at, status)
+		VALUES (2, 1, 2, 1, 1, '2026-08-18T08:00:00Z', 'pending')`)
+
+	if err := RebalancePendingSchedules(db, []int64{1}); err != nil {
+		t.Fatalf("rebalance: %v", err)
+	}
+
+	var firstRaw, secondRaw string
+	if err := db.QueryRow("SELECT send_at FROM scheduled_sends WHERE id = 1").Scan(&firstRaw); err != nil {
+		t.Fatalf("reading first send: %v", err)
+	}
+	if err := db.QueryRow("SELECT send_at FROM scheduled_sends WHERE id = 2").Scan(&secondRaw); err != nil {
+		t.Fatalf("reading second send: %v", err)
+	}
+	first, err := parseDBTimestamp(firstRaw)
+	if err != nil {
+		t.Fatalf("parsing first send: %v", err)
+	}
+	second, err := parseDBTimestamp(secondRaw)
+	if err != nil {
+		t.Fatalf("parsing second send: %v", err)
+	}
+
+	if got := second.Sub(first); got < 15*time.Minute {
+		t.Fatalf("expected at least a 15-minute account gap, got %s (%s then %s)", got, firstRaw, secondRaw)
+	}
+	for email, sendAt := range map[string]time.Time{"dublin@x.com": first, "london@x.com": second} {
+		loc, _ := time.LoadLocation("Europe/London")
+		local := sendAt.In(loc)
+		if local.Hour() < 9 || local.Hour() >= 11 {
+			t.Fatalf("%s moved outside its 09:00-11:00 local window: %s", email, local)
+		}
+	}
+}
+
 func TestRebalancePendingSchedules_PullsUnsentLeadTimezoneRowsBackFromFarFuture(t *testing.T) {
 	origNow := timeNow
 	timeNow = func() time.Time { return time.Date(2026, time.May, 8, 12, 0, 0, 0, time.UTC) }
@@ -1032,6 +1093,50 @@ steps:
 	}
 	if minGap != 100 {
 		t.Errorf("expected min_gap=100, got %d", minGap)
+	}
+}
+
+func TestCloneCampaign_StartDate(t *testing.T) {
+	db := testDB(t)
+
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	seqYAML := `name: Test
+defaults:
+  from_name: "Test"
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi"
+    body: "Hello"
+`
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content,
+		send_window_start, send_window_end, send_days, timezone, min_gap_seconds, max_gap_seconds)
+		VALUES ('source-start-date', 'active', 'seq.yml', ?, '09:00', '11:00', 'tue,wed,thu', 'UTC', 900, 1800)`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+
+	csvPath := writeTempCSV(t, "email\nalice@new.com\n")
+	result, err := CloneCampaign(db, CloneCampaignOpts{
+		SourceName: "source-start-date",
+		NewName:    "cloned-start-date",
+		LeadsFile:  csvPath,
+		StartDate:  "2099-04-07",
+	})
+	if err != nil {
+		t.Fatalf("CloneCampaign error: %v", err)
+	}
+
+	var storedStartDate, sendAt string
+	if err := db.QueryRow("SELECT start_date FROM campaigns WHERE id = ?", result.ID).Scan(&storedStartDate); err != nil {
+		t.Fatalf("reading cloned start date: %v", err)
+	}
+	if err := db.QueryRow("SELECT send_at FROM scheduled_sends WHERE campaign_id = ? AND step_number = 1", result.ID).Scan(&sendAt); err != nil {
+		t.Fatalf("reading cloned schedule: %v", err)
+	}
+	if storedStartDate != "2099-04-07" {
+		t.Fatalf("expected stored start date 2099-04-07, got %q", storedStartDate)
+	}
+	if !strings.Contains(sendAt, "2099-04-07") {
+		t.Fatalf("expected first send on the requested start date, got %q", sendAt)
 	}
 }
 

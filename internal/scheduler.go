@@ -223,6 +223,7 @@ type campaignScheduleRules struct {
 	Timezone        *time.Location
 	WindowStartTOD  timeOfDay
 	WindowEndTOD    timeOfDay
+	MinGapSeconds   int
 	StepByNumber    map[int]SequenceStep
 }
 
@@ -341,6 +342,8 @@ func rebalancePendingSchedulesTx(tx *Tx, accountIDs []int64) error {
 			limit = 1
 		}
 
+		var lastAssignedAt time.Time
+		lastAssignedMinGap := 0
 		for {
 			var candidates []pendingScheduleCandidate
 			for _, queue := range queues {
@@ -379,7 +382,19 @@ func rebalancePendingSchedulesTx(tx *Tx, accountIDs []int64) error {
 			})
 
 			candidate := candidates[0]
-			assignedAt := allocateDailyLimitedSendAt(candidate.at, candidate.queue.rules, usage, limit)
+			earliest := candidate.at
+			if !lastAssignedAt.IsZero() {
+				gapSeconds := candidate.queue.rules.MinGapSeconds
+				if lastAssignedMinGap > gapSeconds {
+					gapSeconds = lastAssignedMinGap
+				}
+				minimumAllowed := lastAssignedAt.Add(time.Duration(gapSeconds) * time.Second)
+				if earliest.Before(minimumAllowed) {
+					earliest = minimumAllowed
+				}
+			}
+
+			assignedAt := allocateDailyLimitedSendAt(earliest, candidate.queue.rules, usage, limit)
 			if _, err := tx.Exec(
 				"UPDATE scheduled_sends SET send_at = ? WHERE id = ?",
 				assignedAt.UTC().Format(time.RFC3339), candidate.row.ID,
@@ -390,6 +405,8 @@ func rebalancePendingSchedulesTx(tx *Tx, accountIDs []int64) error {
 			if err := candidate.queue.advance(assignedAt); err != nil {
 				return err
 			}
+			lastAssignedAt = assignedAt
+			lastAssignedMinGap = candidate.queue.rules.MinGapSeconds
 		}
 	}
 
@@ -423,7 +440,7 @@ func loadAccountScheduleRowsTx(tx *Tx, accountIDs []int64) ([]accountScheduleRow
 	query, args := accountIDInClauseQuery(`
 		SELECT ss.id, ss.campaign_id, ss.lead_id, l.email, ss.account_id, ss.step_number, ss.status,
 			CAST(ss.send_at AS TEXT), CASE WHEN ss.sent_at IS NULL THEN NULL ELSE CAST(ss.sent_at AS TEXT) END, c.sequence_file, c.sequence_content, c.start_date,
-			c.send_window_start, c.send_window_end, c.send_days, c.timezone, l.custom_fields
+			c.send_window_start, c.send_window_end, c.send_days, c.timezone, c.min_gap_seconds, l.custom_fields
 		FROM scheduled_sends ss
 		JOIN campaigns c ON c.id = ss.campaign_id
 		JOIN leads l ON l.id = ss.lead_id
@@ -445,10 +462,11 @@ func loadAccountScheduleRowsTx(tx *Tx, accountIDs []int64) ([]accountScheduleRow
 		var sendAtStr string
 		var sentAtStr sql.NullString
 		var seqFile, seqContent, startDate, sendWindowStart, sendWindowEnd, sendDaysStr, timezoneName string
+		var minGapSeconds int
 		var customFields string
 		if err := rows.Scan(
 			&row.ID, &row.CampaignID, &row.LeadID, &row.LeadEmail, &row.AccountID, &row.StepNumber, &row.Status,
-			&sendAtStr, &sentAtStr, &seqFile, &seqContent, &startDate, &sendWindowStart, &sendWindowEnd, &sendDaysStr, &timezoneName, &customFields,
+			&sendAtStr, &sentAtStr, &seqFile, &seqContent, &startDate, &sendWindowStart, &sendWindowEnd, &sendDaysStr, &timezoneName, &minGapSeconds, &customFields,
 		); err != nil {
 			return nil, nil, err
 		}
@@ -511,6 +529,7 @@ func loadAccountScheduleRowsTx(tx *Tx, accountIDs []int64) ([]accountScheduleRow
 			Timezone:        tz,
 			WindowStartTOD:  windowStartTOD,
 			WindowEndTOD:    windowEndTOD,
+			MinGapSeconds:   minGapSeconds,
 			StepByNumber:    stepByNumber,
 		}
 	}

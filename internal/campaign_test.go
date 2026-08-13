@@ -439,8 +439,8 @@ steps:
 	if len(preview) != 1 {
 		t.Fatalf("expected 1 preview row, got %d", len(preview))
 	}
-	if preview[0].SendAt != "2026-04-08T09:00:00Z" {
-		t.Fatalf("expected preview rebalance to defer to 2026-04-08T09:00:00Z, got %q", preview[0].SendAt)
+	if preview[0].SendAt != "2026-04-08T09:01:30Z" {
+		t.Fatalf("expected preview rebalance to defer with the minimum gap preserved, got %q", preview[0].SendAt)
 	}
 }
 
@@ -483,7 +483,7 @@ steps:
 	if err != nil {
 		t.Fatalf("previewing campaign-b: %v", err)
 	}
-	if len(preview) != 1 || preview[0].SendAt != "2026-04-08T09:00:00Z" {
+	if len(preview) != 1 || preview[0].SendAt != "2026-04-08T09:01:30Z" {
 		t.Fatalf("expected preview to match warning-rebalanced schedule, got %+v", preview)
 	}
 }
@@ -730,6 +730,57 @@ steps:
 	}
 }
 
+func TestUpdateCampaign_StartDateReschedulesPendingSends(t *testing.T) {
+	db := testDB(t)
+
+	origNow := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 13, 16, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = origNow })
+
+	seqYAML := `name: Sequence
+defaults:
+  from_name: Tester
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi"
+    body: "Step 1"
+  - step: 2
+    delay: 6
+    body: "Step 2"
+`
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content, start_date,
+		send_window_start, send_window_end, send_days, timezone)
+		VALUES ('start-date-update', 'draft', 'seq.yml', ?, '', '09:00', '11:00', 'tue,wed,thu', 'UTC')`, seqYAML)
+	db.Exec("INSERT INTO leads (email) VALUES ('alice@acme.com')")
+	db.Exec("INSERT INTO campaign_leads (campaign_id, lead_id, status) VALUES (1, 1, 'active')")
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+	db.Exec(`INSERT INTO scheduled_sends (campaign_id, lead_id, account_id, step_number, send_at, status)
+		VALUES (1, 1, 1, 1, '2026-08-13T16:30:00Z', 'pending')`)
+	db.Exec(`INSERT INTO scheduled_sends (campaign_id, lead_id, account_id, step_number, send_at, status)
+		VALUES (1, 1, 1, 2, '2026-08-20T09:00:00Z', 'pending')`)
+
+	startDate := "2026-08-18"
+	if err := UpdateCampaign(db, "start-date-update", UpdateCampaignOpts{StartDate: &startDate}); err != nil {
+		t.Fatalf("UpdateCampaign with start date: %v", err)
+	}
+
+	var storedStartDate, step1, step2 string
+	db.QueryRow("SELECT start_date FROM campaigns WHERE name = 'start-date-update'").Scan(&storedStartDate)
+	db.QueryRow("SELECT send_at FROM scheduled_sends WHERE campaign_id = 1 AND step_number = 1").Scan(&step1)
+	db.QueryRow("SELECT send_at FROM scheduled_sends WHERE campaign_id = 1 AND step_number = 2").Scan(&step2)
+	if storedStartDate != startDate {
+		t.Fatalf("expected stored start date %q, got %q", startDate, storedStartDate)
+	}
+	if step1 != "2026-08-18T09:00:00Z" {
+		t.Fatalf("expected step 1 on start date, got %q", step1)
+	}
+	if step2 != "2026-08-25T09:00:00Z" {
+		t.Fatalf("expected step 2 on next sendable day after delay, got %q", step2)
+	}
+}
+
 func TestRetryCampaign_AllFailed(t *testing.T) {
 	db := testDB(t)
 	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
@@ -859,6 +910,7 @@ func TestFormatSendDays(t *testing.T) {
 		{"2,4", "Tue,Thu"},
 		{"0,6", "Sun,Sat"},
 		{"1,2,3", "Mon-Wed"},
+		{"tue,wed,thu", "Tue-Thu"},
 	}
 	for _, tt := range tests {
 		got := FormatSendDays(tt.input)

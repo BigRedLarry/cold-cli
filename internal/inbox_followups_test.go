@@ -132,6 +132,37 @@ func TestFindFollowupCandidatesExcludesPriorRevivalByDefault(t *testing.T) {
 	}
 }
 
+func TestFindFollowupCandidatesCountsConversationAcrossProviderThreadIDs(t *testing.T) {
+	_, _, store, campaignID, leadID := seedStoredReplyThread(t, AccountProviderGWS)
+	now := time.Date(2026, time.January, 20, 12, 0, 0, 0, time.UTC)
+	insertFollowupTestMessage(t, store, EmailMessage{
+		CampaignID: campaignID, LeadID: leadID, AccountID: 1,
+		Direction: EmailMessageDirectionOutbound, Type: EmailMessageTypeManualReply,
+		MessageID: "<answer@example.com>", ThreadID: "provider-thread-2", InReplyTo: "<reply@example.net>",
+		FromEmail: "sender@example.com", ToEmails: "lead@example.net", Subject: "Re: Question",
+		TextBody: "Here are the details", OccurredAt: now.AddDate(0, 0, -12),
+	})
+
+	result, err := FindFollowupCandidates(FindFollowupCandidatesConfig{
+		DB: store.DB, WorkspaceID: "storeinspect", Since: now.AddDate(0, 0, -30),
+		Now: now, MinAge: 7 * 24 * time.Hour, MaxFollowups: 0, Limit: 20,
+		IncludeThread: true,
+	})
+	if err != nil {
+		t.Fatalf("FindFollowupCandidates error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected one candidate, got %+v", result)
+	}
+	candidate := result[0]
+	if candidate.MessageCount != 3 || candidate.ReplyCount != 1 || len(candidate.Thread) != 3 {
+		t.Fatalf("expected full campaign conversation across provider thread IDs, got %+v", candidate)
+	}
+	if candidate.LastInboundBody != "Interested" || candidate.LastOutboundBody != "Here are the details" {
+		t.Fatalf("expected context across provider thread IDs, got %+v", candidate)
+	}
+}
+
 func TestFindFollowupCandidatesExcludesSuppressedLead(t *testing.T) {
 	_, _, store, campaignID, leadID := seedStoredReplyThread(t, AccountProviderGWS)
 	now := time.Date(2026, time.January, 20, 12, 0, 0, 0, time.UTC)

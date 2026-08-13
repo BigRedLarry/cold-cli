@@ -163,9 +163,11 @@ cold-cli account remove <email>            # deactivate (re-add later with accou
 
 cold-cli campaign init [directory]         # scaffold example sequence.yml + leads.csv
 cold-cli campaign validate-leads --leads <csv>  # MX + SMTP recipient preflight before create/add-leads
+cold-cli --workspace workspace-a campaign preflight --leads <csv>
+                                            # duplicates + prior campaign history + suppression + recipient gate
 cold-cli --workspace workspace-a campaign create --name --sequence --leads --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
 cold-cli --workspace workspace-a campaign create --name --sequence-inline '...' --leads-inline '...' --accounts  # no files needed
-cold-cli campaign clone <source> --name <new> --leads <csv>
+cold-cli campaign clone <source> --name <new> --leads <csv> [--start-date YYYY-MM-DD]
 cold-cli campaign add-leads <name|id> --leads <csv>    # or --leads-inline '...'
 cold-cli campaign remove-lead <name|id> <email>        # remove one lead from a campaign
 cold-cli campaign preview <name|id>        # see full schedule before activating
@@ -201,6 +203,8 @@ cold-cli --workspace storeinspect inbox followups --since 120d --min-age 7d
                                             # fail-closed post-conversation candidate review
 cold-cli --workspace storeinspect inbox followups --since 120d --min-age 7d --reconcile
                                             # reconcile, verify, then list candidates; never sends
+cold-cli --workspace storeinspect inbox needs-reply --since 120d --reconcile
+                                            # reconcile, verify, then list latest-inbound threads; never sends
 cold-cli --workspace storeinspect inbox reply --campaign 123 --lead 456 --body-file reply.txt
                                             # refresh, then preview a manual thread reply; never sends by default
 cold-cli --workspace storeinspect inbox reply --campaign 123 --lead 456 --body-file reply.txt --send --confirm-to lead@example.com
@@ -350,6 +354,28 @@ cold-cli campaign validate-leads --leads leads.csv --allow-unknown
 
 Do not run recipient validation inside `tick`: live SMTP checks are slow and can be inconclusive. Validate during campaign prep, then import only rows that pass or have an explicit manual approval.
 
+### Campaign Lead Preflight
+
+`campaign preflight` is the read-only gate to run before `campaign create`,
+`campaign clone`, or `campaign add-leads`. It combines input duplicate checks,
+cross-campaign history, global suppressions, and the same MX/SMTP policy used by
+`validate-leads`:
+
+```bash
+cold-cli --workspace storeinspect campaign preflight --leads leads.csv
+```
+
+By default it checks prior email and company-domain history across every
+workspace. This prevents a contact reached by one hosted project from being
+silently reused by another. It also blocks more than one candidate at the same
+company email domain. Use `--history-scope workspace` or `--allow-same-domain`
+only after reviewing why the narrower gate is appropriate.
+
+Use `--skip-email-validation` for a fast duplicate, history, and suppression
+pass before spending time on lead research. The command never creates,
+imports, schedules, or sends anything. It exits non-zero on manual-review or
+blocked rows unless `--no-strict-exit` is present.
+
 ### Reply & Unsubscribe Detection
 
 Matches inbox messages to sent emails using `In-Reply-To` headers, with provider thread/message IDs as a fallback where available. When a reply is detected, the lead is marked `replied` and remaining sends for that lead are cancelled. With `stop_on_domain_reply`, all other leads on the same domain are paused.
@@ -430,6 +456,23 @@ moved out of INBOX. Messages deleted from the provider before reconciliation
 cannot be recovered. Discord labels replies imported by reconciliation as
 `Recovered historical reply` and retains their original arrival timestamp;
 only replies discovered by routine polling are labeled as new.
+
+### Provider-Verified Needs-Reply Review
+
+`inbox needs-reply` lists campaign conversations whose latest
+provider-confirmed message is a human inbound reply. It is ordered oldest first
+so missed replies are visible. The command uses the same mandatory provider
+audit as `inbox followups`: it fails closed if provider state cannot be read or
+if any campaign-thread message is missing.
+
+```bash
+cold-cli --workspace storeinspect inbox needs-reply --since 120d --reconcile
+cold-cli --workspace storeinspect inbox needs-reply --since 120d --reconcile --show-thread
+```
+
+This is a structural review queue, not a requirement to answer every message.
+Polite closings, declines, handoffs, and completed conversations still require
+human classification. The command never drafts or sends.
 
 ### Bounce Detection
 
@@ -518,13 +561,14 @@ When round-robin is used, all steps for a given lead use the same account so fol
 Clone a campaign with new leads. Copies sequence, settings, and accounts:
 
 ```bash
-cold-cli campaign clone q1-outreach --name q2-outreach --leads new-leads.csv
+cold-cli campaign clone q1-outreach --name q2-outreach --leads new-leads.csv --start-date 2026-09-01
 ```
 
 Add more leads to a running campaign:
 
 ```bash
 cold-cli campaign validate-leads --leads more-leads.csv
+cold-cli campaign preflight --leads more-leads.csv
 cold-cli campaign add-leads q1-outreach --leads more-leads.csv
 ```
 

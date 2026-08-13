@@ -240,7 +240,6 @@ func FindFollowupCandidates(cfg FindFollowupCandidatesConfig) ([]FollowupCandida
 		messages, err := ListEmailThreadMessages(cfg.DB, ListEmailThreadMessagesOpts{
 			CampaignID: head.Latest.CampaignID,
 			LeadID:     head.Latest.LeadID,
-			ThreadID:   head.Latest.ThreadID,
 			Limit:      500,
 		})
 		if err != nil {
