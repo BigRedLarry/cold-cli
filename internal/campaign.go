@@ -758,21 +758,23 @@ type FailureReason struct {
 
 // CampaignStatusInfo is returned by GetCampaignStatus.
 type CampaignStatusInfo struct {
-	Name           string          `json:"name"`
-	Status         string          `json:"status"`
-	Sequence       string          `json:"sequence"`
-	Timezone       string          `json:"timezone"`
-	SendWindow     string          `json:"send_window"`
-	SendDays       string          `json:"send_days"`
-	Leads          int             `json:"leads"`
-	Accounts       int             `json:"accounts"`
-	TotalSends     int             `json:"total_sends"`
-	SendCounts     map[string]int  `json:"send_counts"`
-	CreatedAt      string          `json:"created_at"`
-	ReplyRate      *float64        `json:"reply_rate,omitempty"`
-	NextSendAt     *string         `json:"next_send_at,omitempty"`
-	LastSendAt     *string         `json:"last_send_at,omitempty"`
-	FailureReasons []FailureReason `json:"failure_reasons,omitempty"`
+	Name               string          `json:"name"`
+	Status             string          `json:"status"`
+	Sequence           string          `json:"sequence"`
+	Timezone           string          `json:"timezone"`
+	SendWindow         string          `json:"send_window"`
+	SendDays           string          `json:"send_days"`
+	Leads              int             `json:"leads"`
+	Accounts           int             `json:"accounts"`
+	TotalSends         int             `json:"total_sends"`
+	SendCounts         map[string]int  `json:"send_counts"`
+	CreatedAt          string          `json:"created_at"`
+	ContactedLeads     int             `json:"contacted_leads"`
+	UniqueRepliedLeads int             `json:"unique_replied_leads"`
+	ReplyRate          *float64        `json:"reply_rate,omitempty"`
+	NextSendAt         *string         `json:"next_send_at,omitempty"`
+	LastSendAt         *string         `json:"last_send_at,omitempty"`
+	FailureReasons     []FailureReason `json:"failure_reasons,omitempty"`
 }
 
 // GetCampaignStatus returns campaign details and send counts.
@@ -833,12 +835,15 @@ func GetCampaignStatus(db *sql.DB, name string) (*CampaignStatusInfo, error) {
 		CreatedAt:  c.CreatedAt,
 	}
 
-	// Reply rate: replies / sent
-	sent := counts["sent"]
-	var replyCount int
-	queryRowDB(db, "SELECT COUNT(*) FROM events WHERE campaign_id = ? AND type = 'reply'", c.ID).Scan(&replyCount)
-	if sent > 0 {
-		rate := float64(replyCount) / float64(sent) * 100
+	// Campaign performance is measured by unique leads, not message events.
+	// Multiple replies in one thread still represent one replying lead, and
+	// follow-up sends must not enlarge the denominator.
+	queryRowDB(db, `SELECT COUNT(DISTINCT lead_id) FROM scheduled_sends
+		WHERE campaign_id = ? AND status = 'sent'`, c.ID).Scan(&info.ContactedLeads)
+	queryRowDB(db, `SELECT COUNT(DISTINCT lead_id) FROM events
+		WHERE campaign_id = ? AND type = 'reply'`, c.ID).Scan(&info.UniqueRepliedLeads)
+	if info.ContactedLeads > 0 {
+		rate := float64(info.UniqueRepliedLeads) / float64(info.ContactedLeads) * 100
 		info.ReplyRate = &rate
 	}
 

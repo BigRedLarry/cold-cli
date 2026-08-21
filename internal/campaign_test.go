@@ -1209,6 +1209,9 @@ func TestGetCampaignStatus(t *testing.T) {
 	} else if *info.ReplyRate != 100.0 {
 		t.Errorf("expected 100%% reply rate (1 reply / 1 sent), got %.1f%%", *info.ReplyRate)
 	}
+	if info.ContactedLeads != 1 || info.UniqueRepliedLeads != 1 {
+		t.Errorf("expected 1 contacted and 1 unique replied lead, got contacted=%d replied=%d", info.ContactedLeads, info.UniqueRepliedLeads)
+	}
 	if info.NextSendAt == nil {
 		t.Error("expected next_send_at to be set")
 	}
@@ -1217,6 +1220,34 @@ func TestGetCampaignStatus(t *testing.T) {
 	}
 	if info.SendWindow != "09:00 - 17:00" {
 		t.Errorf("expected send window '09:00 - 17:00', got %q", info.SendWindow)
+	}
+}
+
+func TestGetCampaignStatusReplyRateUsesUniqueLeads(t *testing.T) {
+	db := testDB(t)
+	db.Exec("INSERT INTO accounts (email) VALUES ('sender@x.com')")
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file)
+		VALUES ('unique-replies', 'active', 'seq.yml')`)
+	db.Exec("INSERT INTO leads (email, domain) VALUES ('a@x.com', 'x.com'), ('b@y.com', 'y.com')")
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+	db.Exec("INSERT INTO campaign_leads (campaign_id, lead_id, status) VALUES (1, 1, 'replied'), (1, 2, 'active')")
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	db.Exec("INSERT INTO scheduled_sends (campaign_id, lead_id, account_id, step_number, send_at, status, sent_at) VALUES (1, 1, 1, 1, ?, 'sent', ?), (1, 1, 1, 2, ?, 'sent', ?), (1, 2, 1, 1, ?, 'sent', ?)", now, now, now, now, now, now)
+	db.Exec("INSERT INTO events (campaign_id, lead_id, account_id, type, step_number, timestamp) VALUES (1, 1, 1, 'reply', 1, ?), (1, 1, 1, 'reply', 1, ?), (1, 1, 1, 'reply', 1, ?)", now, now, now)
+
+	info, err := GetCampaignStatus(db, "unique-replies")
+	if err != nil {
+		t.Fatalf("GetCampaignStatus: %v", err)
+	}
+	if info.ContactedLeads != 2 {
+		t.Fatalf("expected 2 unique contacted leads, got %d", info.ContactedLeads)
+	}
+	if info.UniqueRepliedLeads != 1 {
+		t.Fatalf("expected 1 unique replied lead, got %d", info.UniqueRepliedLeads)
+	}
+	if info.ReplyRate == nil || *info.ReplyRate != 50 {
+		t.Fatalf("expected 50%% unique-lead reply rate, got %v", info.ReplyRate)
 	}
 }
 

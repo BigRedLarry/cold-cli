@@ -20,7 +20,7 @@ func GetAllCampaignStats(db *sql.DB) ([]CampaignStats, error) {
 	rows, err := queryDB(db, `
 		SELECT c.name, c.status,
 			COALESCE(SUM(CASE WHEN e.type = 'sent' THEN 1 ELSE 0 END), 0) as sent,
-			COALESCE(SUM(CASE WHEN e.type = 'reply' THEN 1 ELSE 0 END), 0) as replies,
+			COUNT(DISTINCT CASE WHEN e.type = 'reply' THEN e.lead_id END) as replies,
 			COALESCE(SUM(CASE WHEN e.type = 'unsubscribe' THEN 1 ELSE 0 END), 0) as unsubscribes,
 			COALESCE(SUM(CASE WHEN e.type = 'bounce' THEN 1 ELSE 0 END), 0) as bounces
 		FROM campaigns c
@@ -55,7 +55,7 @@ func GetCampaignStepStats(db *sql.DB, campaignID int64) ([]StepStats, error) {
 	rows, err := queryDB(db, `
 		SELECT e.step_number,
 			SUM(CASE WHEN e.type = 'sent' THEN 1 ELSE 0 END) as sent,
-			SUM(CASE WHEN e.type = 'reply' THEN 1 ELSE 0 END) as replies,
+			COUNT(DISTINCT CASE WHEN e.type = 'reply' THEN e.lead_id END) as replies,
 			SUM(CASE WHEN e.type = 'unsubscribe' THEN 1 ELSE 0 END) as unsubscribes,
 			SUM(CASE WHEN e.type = 'bounce' THEN 1 ELSE 0 END) as bounces
 		FROM events e
@@ -92,7 +92,7 @@ func GetCampaignVariantStats(db *sql.DB, campaignID int64) ([]VariantStats, erro
 	rows, err := queryDB(db, `
 		SELECT ss.step_number, ss.variant_index,
 			COUNT(DISTINCT CASE WHEN ss.status = 'sent' THEN ss.id END) as sent,
-			COUNT(DISTINCT CASE WHEN e.type = 'reply' THEN e.id END) as replies,
+			COUNT(DISTINCT CASE WHEN e.type = 'reply' THEN e.lead_id END) as replies,
 			COUNT(DISTINCT CASE WHEN e.type = 'unsubscribe' THEN e.id END) as unsubscribes,
 			COUNT(DISTINCT CASE WHEN e.type = 'bounce' THEN e.id END) as bounces
 		FROM scheduled_sends ss

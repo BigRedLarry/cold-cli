@@ -1752,6 +1752,8 @@ var campaignStatusCmd = &cobra.Command{
 		fmt.Printf("  send window: %s\n", info.SendWindow)
 		fmt.Printf("  send days:   %s\n", info.SendDays)
 		fmt.Printf("  leads:       %d\n", info.Leads)
+		fmt.Printf("  contacted:   %d\n", info.ContactedLeads)
+		fmt.Printf("  replied:     %d unique leads\n", info.UniqueRepliedLeads)
 		fmt.Printf("  accounts:    %d\n", info.Accounts)
 		fmt.Printf("  created:     %s\n", info.CreatedAt)
 		if info.ReplyRate != nil {
