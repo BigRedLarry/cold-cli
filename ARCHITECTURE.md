@@ -261,6 +261,7 @@ Simple `strings.ReplaceAll` for `{{placeholder}}` substitution. No template engi
 
 - Placeholders validated at campaign creation: extract all `{{X}}` from sequence YAML, verify every lead has non-empty values
 - Common aliases auto-resolved: `{{name}}` → `first_name`, `{{firstname}}` → `first_name`, `{{last}}` → `last_name`, etc.
+- Sender placeholders are derived from the assigned account at render time: `{{sender_email}}`, `{{sender_local}}`, `{{sender_domain}}`, `{{sender_name}}`
 - Unknown placeholders produce actionable errors with available field list and Levenshtein "Did you mean?" suggestions
 - CSV schema: `email` is the only hardcoded required column; all other required columns are driven by the sequence's placeholders
 - CSV column aliases auto-mapped: a `name` column becomes `first_name` (unless `first_name` already exists)
@@ -347,7 +348,7 @@ cold-cli account list --all-workspaces
 cold-cli account pause/resume/remove/update <email>
 
 cold-cli campaign init [directory]
-cold-cli --workspace <id> campaign create --name --sequence --leads --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
+cold-cli --workspace <id> campaign create --name --sequence [--leads] --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
 cold-cli --workspace <id> campaign create --name --sequence-inline '...' --leads-inline '...' --accounts
 cold-cli campaign clone <source> --name <new> --leads <csv>  # or --leads-inline
 cold-cli campaign add-leads <name|id> --leads <csv> [--start-date YYYY-MM-DD] [--preview-only] [--reactivate]

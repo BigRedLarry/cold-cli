@@ -943,8 +943,8 @@ var campaignCmd = &cobra.Command{
 
 var campaignCreateCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a new campaign from a sequence YAML and leads CSV",
-	Long:  "Create a new campaign from a sequence YAML and leads CSV. Leads may optionally include a schedule_timezone CSV column for per-lead timezone scheduling while still using the campaign send window and send days.",
+	Short: "Create a new campaign from a sequence YAML",
+	Long:  "Create a new campaign from a sequence YAML. If leads are provided, they may optionally include a schedule_timezone CSV column for per-lead timezone scheduling while still using the campaign send window and send days. If leads are omitted, an empty draft campaign is created for later campaign add-leads.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name, _ := cmd.Flags().GetString("name")
 		seqFile, _ := cmd.Flags().GetString("sequence")
@@ -961,10 +961,6 @@ var campaignCreateCmd = &cobra.Command{
 		if seqFile == "" && seqInline == "" {
 			return fmt.Errorf("provide --sequence (file path) or --sequence-inline (YAML content)")
 		}
-		if leadsFile == "" && leadsInline == "" {
-			return fmt.Errorf("provide --leads (file path) or --leads-inline (CSV content)")
-		}
-
 		db, err := openDB()
 		if err != nil {
 			return err
@@ -1034,7 +1030,11 @@ var campaignPreviewCmd = &cobra.Command{
 				if i > 0 {
 					fmt.Println(strings.Repeat("-", 60))
 				}
-				fmt.Printf("Step %d (variant %d) | %s -> %s\n", e.StepNumber, e.VariantIndex, e.AccountEmail, e.LeadEmail)
+				from := e.AccountEmail
+				if e.FromName != "" {
+					from = fmt.Sprintf("%s <%s>", e.FromName, e.AccountEmail)
+				}
+				fmt.Printf("Step %d (variant %d) | %s -> %s\n", e.StepNumber, e.VariantIndex, from, e.LeadEmail)
 				fmt.Printf("Subject: %s\n\n", e.Subject)
 				if len(e.StrippedVars) > 0 {
 					fmt.Printf("Stripped vars: %s\n\n", strings.Join(e.StrippedVars, ", "))
@@ -1378,7 +1378,11 @@ var campaignAddLeadsCmd = &cobra.Command{
 		if result.PreviewOnly {
 			fmt.Printf("Preview only for %q; no leads or sends were saved.\n", result.Campaign)
 			for _, email := range result.Emails {
-				fmt.Printf("\nStep %d | %s | %s -> %s\n", email.StepNumber, email.SendAt, email.AccountEmail, email.LeadEmail)
+				from := email.AccountEmail
+				if email.FromName != "" {
+					from = fmt.Sprintf("%s <%s>", email.FromName, email.AccountEmail)
+				}
+				fmt.Printf("\nStep %d | %s | %s -> %s\n", email.StepNumber, email.SendAt, from, email.LeadEmail)
 				fmt.Printf("Subject: %s\n\n%s\n", email.Subject, email.Body)
 			}
 			return nil
@@ -2868,7 +2872,7 @@ func init() {
 	campaignAddLeadsCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads; optional per-lead schedule_timezone column supported)")
 	campaignAddLeadsCmd.Flags().String("start-date", "", "start date for this added cohort (YYYY-MM-DD); required after an active campaign's start date arrives")
 	campaignAddLeadsCmd.Flags().Bool("preview-only", false, "render and schedule the cohort in a rollback-only transaction without saving leads or sends")
-	campaignAddLeadsCmd.Flags().Bool("reactivate", false, "reactivate a completed campaign when adding this new cohort")
+	campaignAddLeadsCmd.Flags().Bool("reactivate", false, "reactivate a completed campaign when adding this new cohort; no-op for active or draft campaigns")
 	campaignValidateLeadsCmd.Flags().String("leads", "", "path to leads CSV file")
 	campaignValidateLeadsCmd.Flags().String("leads-inline", "", "leads CSV content (alternative to --leads)")
 	campaignValidateLeadsCmd.Flags().Bool("allow-free-email", false, "allow Gmail/free-mail domains to pass even though exact mailboxes are not SMTP-verified")

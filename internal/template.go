@@ -10,6 +10,16 @@ var placeholderRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
 // BuiltinFields are fields always available for template rendering from the leads table.
 var BuiltinFields = []string{"email", "first_name", "last_name", "company", "domain"}
 
+// SenderFields are derived from the account assigned to a scheduled send.
+var SenderFields = []string{"sender_email", "sender_local", "sender_domain", "sender_name"}
+
+var senderFieldSet = map[string]bool{
+	"sender_email":  true,
+	"sender_local":  true,
+	"sender_domain": true,
+	"sender_name":   true,
+}
+
 // fieldAliases maps common shorthand names to their canonical field names.
 var fieldAliases = map[string]string{
 	"name":      "first_name",
@@ -59,6 +69,52 @@ func RenderTemplate(tmpl string, fields map[string]string) string {
 		}
 	}
 	return result
+}
+
+// SenderTemplateFields returns template fields derived from a sending account.
+func SenderTemplateFields(fromEmail string) map[string]string {
+	fields := map[string]string{
+		"sender_email": fromEmail,
+	}
+
+	local, domain, ok := strings.Cut(fromEmail, "@")
+	if ok {
+		fields["sender_local"] = local
+		fields["sender_domain"] = domain
+	} else {
+		fields["sender_local"] = fromEmail
+		fields["sender_domain"] = ""
+	}
+	fields["sender_name"] = senderNameFromLocal(fields["sender_local"])
+
+	return fields
+}
+
+func senderNameFromLocal(local string) string {
+	base, _, _ := strings.Cut(local, "+")
+	parts := strings.FieldsFunc(base, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-'
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+
+	for i, part := range parts {
+		parts[i] = titleASCII(part)
+	}
+	return strings.Join(parts, " ")
+}
+
+func titleASCII(value string) string {
+	value = strings.ToLower(value)
+	if value == "" {
+		return ""
+	}
+	b := []byte(value)
+	if b[0] >= 'a' && b[0] <= 'z' {
+		b[0] -= 'a' - 'A'
+	}
+	return string(b)
 }
 
 // doubleSpaceRe matches two or more consecutive spaces.

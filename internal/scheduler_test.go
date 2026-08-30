@@ -152,6 +152,49 @@ steps:
 	}
 }
 
+func TestCollectPlaceholders_IncludesDefaultFromName(t *testing.T) {
+	yaml := []byte(`
+defaults:
+  from_name: "{{sender_name}}"
+steps:
+  - step: 1
+    subject: "Hi {{first_name}}"
+    body: "Hello"
+`)
+	seq, err := ParseSequenceFromBytes(yaml)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	placeholders := seq.CollectPlaceholders()
+	expected := map[string]bool{
+		"sender_name": true,
+		"first_name":  true,
+	}
+	if len(placeholders) != len(expected) {
+		t.Fatalf("expected %d placeholders, got %d: %v", len(expected), len(placeholders), placeholders)
+	}
+	for _, p := range placeholders {
+		if !expected[p] {
+			t.Errorf("unexpected placeholder: %s", p)
+		}
+	}
+}
+
+func TestValidateLeadFields_AllowsSenderFieldsWithoutCSVColumns(t *testing.T) {
+	leads := []LeadRecord{
+		{Fields: map[string]string{
+			"email":      "john@example.com",
+			"first_name": "John",
+		}},
+	}
+
+	_, err := ValidateLeadFields(leads, []string{"first_name", "sender_name", "sender_email", "sender_local", "sender_domain"})
+	if err != nil {
+		t.Fatalf("expected sender fields to be valid without CSV columns: %v", err)
+	}
+}
+
 func TestComputeSchedule_Basic(t *testing.T) {
 	seq := &Sequence{
 		Steps: []SequenceStep{
@@ -1340,6 +1383,48 @@ steps:
 	db.QueryRow("SELECT status FROM campaigns WHERE id = 1").Scan(&status)
 	if status != "active" {
 		t.Fatalf("expected active campaign, got %q", status)
+	}
+}
+
+func TestAddLeadsToCampaign_DraftAllowsReactivateNoOp(t *testing.T) {
+	db := testDB(t)
+	origNow := timeNow
+	timeNow = func() time.Time { return time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { timeNow = origNow })
+
+	db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('sender@x.com', 50)")
+	seqYAML := `name: Test
+defaults:
+  from_name: "Test"
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi"
+    body: "Hello"
+`
+	db.Exec(`INSERT INTO campaigns (name, status, sequence_file, sequence_content,
+		send_window_start, send_window_end, send_days, timezone)
+		VALUES ('draft-evergreen', 'draft', 'seq.yml', ?, '09:00', '11:00', '1,2,3,4,5', 'UTC')`, seqYAML)
+	db.Exec("INSERT INTO campaign_accounts (campaign_id, account_id) VALUES (1, 1)")
+	csvPath := writeTempCSV(t, "email\nalice@new.com\n")
+
+	preview, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "draft-evergreen",
+		LeadsFile:    csvPath,
+		StartDate:    "2026-08-25",
+		PreviewOnly:  true,
+		Reactivate:   true,
+	})
+	if err != nil {
+		t.Fatalf("draft reactivation preview should be a no-op: %v", err)
+	}
+	if preview.WouldReactivate {
+		t.Fatalf("draft campaign should not report reactivation: %+v", preview)
+	}
+	var status string
+	db.QueryRow("SELECT status FROM campaigns WHERE id = 1").Scan(&status)
+	if status != "draft" {
+		t.Fatalf("preview changed status to %q", status)
 	}
 }
 

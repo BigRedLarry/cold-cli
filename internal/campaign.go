@@ -234,20 +234,23 @@ func CreateCampaign(db *sql.DB, opts CreateCampaignOpts) (*CreateCampaignResult,
 	var records []LeadRecord
 	if opts.LeadsInline != "" {
 		records, _, err = ParseLeadsCSVFromReader(strings.NewReader(opts.LeadsInline))
-	} else {
+	} else if opts.LeadsFile != "" {
 		records, _, err = ParseLeadsCSV(opts.LeadsFile)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidateLeadScheduleOverrides(records); err != nil {
-		return nil, err
-	}
+	var validationWarnings []string
+	if len(records) > 0 {
+		if err := ValidateLeadScheduleOverrides(records); err != nil {
+			return nil, err
+		}
 
-	placeholders := seq.CollectPlaceholders()
-	validationWarnings, err := ValidateLeadFields(records, placeholders)
-	if err != nil {
-		return nil, err
+		placeholders := seq.CollectPlaceholders()
+		validationWarnings, err = ValidateLeadFields(records, placeholders)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	accountIDs, err := resolveWorkspaceAccountIDs(db, workspaceID, opts.AccountEmails)
@@ -390,8 +393,11 @@ func CreateCampaign(db *sql.DB, opts CreateCampaignOpts) (*CreateCampaignResult,
 			leadsForSchedule = append(leadsForSchedule, LeadForSchedule{ID: leadID, Fields: rec.Fields})
 		}
 
-		if len(leadsForSchedule) == 0 {
+		if len(records) > 0 && len(leadsForSchedule) == 0 {
 			return out, fmt.Errorf("no eligible leads (all blacklisted or bounced)")
+		}
+		if len(leadsForSchedule) == 0 {
+			return out, nil
 		}
 
 		schedRows, err := ComputeSchedule(ScheduleConfig{
@@ -553,6 +559,7 @@ type RenderedEmail struct {
 	VariantIndex int      `json:"variant_index"`
 	LeadEmail    string   `json:"lead_email"`
 	AccountEmail string   `json:"account_email"`
+	FromName     string   `json:"from_name"`
 	Subject      string   `json:"subject"`
 	Body         string   `json:"body"`
 	StrippedVars []string `json:"stripped_vars,omitempty"`
@@ -667,6 +674,7 @@ func GetCampaignRenderedPreview(db *sql.DB, name string, leadEmail string) ([]Re
 			VariantIndex: vi,
 			LeadEmail:    firstLeadEmail,
 			AccountEmail: accEmail,
+			FromName:     params.FromName,
 			Subject:      params.Subject,
 			Body:         params.Body,
 			StrippedVars: params.StrippedVars,
@@ -1182,6 +1190,7 @@ type PlannedEmail struct {
 	SendAt       string   `json:"send_at"`
 	LeadEmail    string   `json:"lead_email"`
 	AccountEmail string   `json:"account_email"`
+	FromName     string   `json:"from_name"`
 	Subject      string   `json:"subject"`
 	Body         string   `json:"body"`
 	StrippedVars []string `json:"stripped_vars,omitempty"`
@@ -1312,7 +1321,7 @@ func AddLeadsToCampaignWithOpts(db *sql.DB, opts AddLeadsToCampaignOpts) (*AddLe
 	if wouldReactivate && !opts.Reactivate {
 		return nil, fmt.Errorf("campaign %q is %s; provide --reactivate to add and activate a new cohort", campaignName, campaignStatus)
 	}
-	if opts.Reactivate && campaignStatus != "active" && !wouldReactivate {
+	if opts.Reactivate && campaignStatus != "active" && campaignStatus != "draft" && !wouldReactivate {
 		return nil, fmt.Errorf("campaign %q is %s and cannot be reactivated by add-leads", campaignName, campaignStatus)
 	}
 
@@ -1426,6 +1435,7 @@ func loadPlannedEmailsTx(tx *Tx, campaignID, afterSendID int64, records []LeadRe
 			return nil, fmt.Errorf("scanning planned email: %w", err)
 		}
 		params := BuildEmailForSend(seq, item.StepNumber, item.VariantIndex, fieldsByEmail[item.LeadEmail], item.AccountEmail)
+		item.FromName = params.FromName
 		item.Subject = params.Subject
 		item.Body = params.Body
 		item.StrippedVars = params.StrippedVars

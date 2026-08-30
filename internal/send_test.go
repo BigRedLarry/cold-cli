@@ -133,6 +133,57 @@ func TestBuildEmailForSend_BaseVariant(t *testing.T) {
 	}
 }
 
+func TestBuildEmailForSend_SenderTemplateFields(t *testing.T) {
+	seq := &Sequence{
+		Defaults: SequenceDefaults{FromName: "{{sender_name}}"},
+		Steps: []SequenceStep{
+			{
+				Step:    1,
+				Subject: "Hi {{first_name}}",
+				Body:    "Hello from {{sender_name}} at {{sender_email}}",
+			},
+		},
+	}
+
+	lead := map[string]string{
+		"email":      "john@acme.com",
+		"first_name": "John",
+	}
+
+	p := BuildEmailForSend(seq, 1, 0, lead, "nora@usestoreinspect.com")
+	if p.FromName != "Nora" {
+		t.Errorf("expected sender-derived from name Nora, got %q", p.FromName)
+	}
+	if p.Body != "Hello from Nora at nora@usestoreinspect.com" {
+		t.Errorf("expected sender fields in body, got %q", p.Body)
+	}
+	if len(p.StrippedVars) != 0 {
+		t.Errorf("expected no stripped vars, got %v", p.StrippedVars)
+	}
+}
+
+func TestBuildEmailForSend_LeadFieldsOverrideSenderFields(t *testing.T) {
+	seq := &Sequence{
+		Defaults: SequenceDefaults{FromName: "{{sender_name}}"},
+		Steps: []SequenceStep{
+			{Step: 1, Subject: "Hi", Body: "Regards,\n{{sender_name}}"},
+		},
+	}
+
+	lead := map[string]string{
+		"email":       "john@acme.com",
+		"sender_name": "Account Team",
+	}
+
+	p := BuildEmailForSend(seq, 1, 0, lead, "maya@withstoreinspect.com")
+	if p.FromName != "Account Team" {
+		t.Errorf("expected lead sender_name to preserve existing custom-field behavior, got %q", p.FromName)
+	}
+	if !strings.Contains(p.Body, "Account Team") {
+		t.Errorf("expected lead sender_name in body, got %q", p.Body)
+	}
+}
+
 func TestBuildEmailForSend_StepNotFound(t *testing.T) {
 	seq := &Sequence{
 		Steps: []SequenceStep{

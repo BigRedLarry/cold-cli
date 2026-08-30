@@ -261,6 +261,118 @@ steps:
 	}
 }
 
+func TestCreateCampaign_RenderedPreview_UsesSenderTemplateFields(t *testing.T) {
+	db := testDB(t)
+	if _, err := db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('clara@storeinspecthq.com', 50)"); err != nil {
+		t.Fatalf("inserting account: %v", err)
+	}
+
+	seqInline := `name: Sender Template Test
+defaults:
+  from_name: "{{sender_name}}"
+steps:
+  - step: 1
+    delay: 0
+    subject: "Hi {{first_name}}"
+    body: |
+      Hi {{first_name}},
+
+      Pulled this from {{sender_email}}.
+
+      {{sender_name}}
+`
+	leadsInline := "email,first_name,company\ntest@example.com,Alice,Acme\n"
+
+	if _, err := CreateCampaign(db, CreateCampaignOpts{
+		Name:           "sender-template-preview",
+		SequenceInline: seqInline,
+		LeadsInline:    leadsInline,
+		AccountEmails:  []string{"clara@storeinspecthq.com"},
+	}); err != nil {
+		t.Fatalf("CreateCampaign error: %v", err)
+	}
+
+	rendered, err := GetCampaignRenderedPreview(db, "sender-template-preview", "test@example.com")
+	if err != nil {
+		t.Fatalf("GetCampaignRenderedPreview error: %v", err)
+	}
+	if len(rendered) != 1 {
+		t.Fatalf("expected 1 rendered email, got %d", len(rendered))
+	}
+	if rendered[0].FromName != "Clara" {
+		t.Fatalf("expected sender-derived from_name Clara, got %q", rendered[0].FromName)
+	}
+	if !strings.Contains(rendered[0].Body, "Pulled this from clara@storeinspecthq.com.") {
+		t.Fatalf("expected sender_email to render, got %q", rendered[0].Body)
+	}
+	if !strings.Contains(rendered[0].Body, "\nClara") {
+		t.Fatalf("expected sender_name signature to render, got %q", rendered[0].Body)
+	}
+}
+
+func TestCreateCampaignWithoutLeadsStoresSequenceForLaterAddLeads(t *testing.T) {
+	db := testDB(t)
+	if _, err := db.Exec("INSERT INTO accounts (email, daily_limit) VALUES ('maya@usestoreinspect.com', 50)"); err != nil {
+		t.Fatalf("inserting account: %v", err)
+	}
+
+	seqInline := `name: Empty Draft Test
+defaults:
+  from_name: "{{sender_name}}"
+steps:
+  - step: 1
+    delay: 0
+    subject: "3 stores"
+    body: |
+      Hi {{first_name}},
+
+      {{sender_name}}
+`
+
+	result, err := CreateCampaign(db, CreateCampaignOpts{
+		Name:           "empty-sequence-draft",
+		SequenceInline: seqInline,
+		AccountEmails:  []string{"maya@usestoreinspect.com"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign without leads error: %v", err)
+	}
+	if result.Leads != 0 || result.ScheduledSends != 0 || result.Accounts != 1 {
+		t.Fatalf("unexpected result counts: leads=%d sends=%d accounts=%d", result.Leads, result.ScheduledSends, result.Accounts)
+	}
+
+	var seqContent string
+	if err := db.QueryRow("SELECT sequence_content FROM campaigns WHERE id = ?", result.ID).Scan(&seqContent); err != nil {
+		t.Fatalf("querying sequence content: %v", err)
+	}
+	if !strings.Contains(seqContent, `from_name: "{{sender_name}}"`) {
+		t.Fatalf("expected stored sequence content, got %q", seqContent)
+	}
+
+	preview, err := AddLeadsToCampaignWithOpts(db, AddLeadsToCampaignOpts{
+		CampaignName: "empty-sequence-draft",
+		LeadsInline:  "email,first_name\nalice@example.com,Alice\n",
+		PreviewOnly:  true,
+	})
+	if err != nil {
+		t.Fatalf("AddLeadsToCampaignWithOpts preview error: %v", err)
+	}
+	if preview.LeadsAdded != 1 || preview.ScheduledSends != 1 {
+		t.Fatalf("unexpected preview counts: leads=%d sends=%d", preview.LeadsAdded, preview.ScheduledSends)
+	}
+	if len(preview.Emails) != 1 || preview.Emails[0].FromName != "Maya" {
+		t.Fatalf("expected sender-rendered preview from Maya, got %#v", preview.Emails)
+	}
+
+	var savedSends int
+	if err := db.QueryRow("SELECT COUNT(*) FROM scheduled_sends WHERE campaign_id = ?", result.ID).Scan(&savedSends); err != nil {
+		t.Fatalf("counting saved sends: %v", err)
+	}
+	if savedSends != 0 {
+		t.Fatalf("expected preview-only add-leads to roll back scheduled sends, got %d", savedSends)
+	}
+}
+
 func TestCreateDraftCampaign(t *testing.T) {
 	db := testDB(t)
 	db.Exec("INSERT INTO accounts (email, status) VALUES ('sender@x.com', 'active')")

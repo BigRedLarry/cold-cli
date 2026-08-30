@@ -66,6 +66,12 @@ cold-cli campaign create \
   --leads leads.csv \
   --accounts you@company.com
 
+# Or create an empty draft shell and add leads later
+cold-cli campaign create \
+  --name "q1-outreach" \
+  --sequence sequence.yml \
+  --accounts you@company.com
+
 # Review the full schedule before sending anything
 cold-cli campaign preview q1-outreach
 
@@ -113,7 +119,7 @@ steps:
 
 - `delay` is in days after the previous step
 - Steps without a `subject` send as replies in the same thread
-- `{{placeholders}}` are replaced from CSV columns
+- `{{placeholders}}` are replaced from CSV columns, plus sender fields such as `{{sender_name}}` and `{{sender_email}}`
 - `variants` enable A/B testing (assigned per lead at creation)
 
 ## Leads CSV
@@ -124,7 +130,13 @@ john@acme.com,John,Acme Inc,America/New_York
 jane@bigcorp.com,Jane,BigCorp,Europe/Oslo
 ```
 
-`email` is the only required column. All other columns are driven by what `{{placeholders}}` your sequence uses. Extra columns beyond the built-in fields (`first_name`, `last_name`, `company`) are stored as custom fields and available for templates at send time.
+`email` is the only required column when importing leads. All other columns are driven by what `{{placeholders}}` your sequence uses. Extra columns beyond the built-in fields (`first_name`, `last_name`, `company`) are stored as custom fields and available for templates at send time.
+
+Sender-derived placeholders are available without CSV columns:
+- `{{sender_email}}` - full assigned sending account email
+- `{{sender_local}}` - local part before `@`
+- `{{sender_domain}}` - domain after `@`
+- `{{sender_name}}` - display name derived from the local part, for example `maya@company.com` renders `Maya`
 
 Supported scheduling override columns:
 - `schedule_timezone` - optional IANA timezone per lead, for example `America/New_York` or `Europe/Oslo`
@@ -165,7 +177,7 @@ cold-cli campaign init [directory]         # scaffold example sequence.yml + lea
 cold-cli campaign validate-leads --leads <csv>  # MX + SMTP recipient preflight before create/add-leads
 cold-cli --workspace workspace-a campaign preflight --leads <csv>
                                             # duplicates + prior campaign history + suppression + recipient gate
-cold-cli --workspace workspace-a campaign create --name --sequence --leads --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
+cold-cli --workspace workspace-a campaign create --name --sequence [--leads] --accounts [--start-date YYYY-MM-DD] [--send-days "1,2,3,4,5"]
 cold-cli --workspace workspace-a campaign create --name --sequence-inline '...' --leads-inline '...' --accounts  # no files needed
 cold-cli campaign clone <source> --name <new> --leads <csv> [--start-date YYYY-MM-DD]
 cold-cli campaign add-leads <name|id> --leads <csv> [--start-date YYYY-MM-DD] [--preview-only] [--reactivate]

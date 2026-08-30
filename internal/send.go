@@ -159,26 +159,42 @@ func BuildEmailForSend(
 		}
 	}
 
+	fields := mergeTemplateFields(lead, SenderTemplateFields(fromEmail))
+
 	// Render templates
-	subject = RenderTemplate(subject, lead)
-	body = RenderTemplate(body, lead)
+	fromName := RenderTemplate(seq.Defaults.FromName, fields)
+	subject = RenderTemplate(subject, fields)
+	body = RenderTemplate(body, fields)
 
 	// Strip any remaining unresolved {{variables}}
 	var allStripped []string
-	subject, stripped := StripUnresolved(subject)
+	fromName, stripped := StripUnresolved(fromName)
+	allStripped = append(allStripped, stripped...)
+	subject, stripped = StripUnresolved(subject)
 	allStripped = append(allStripped, stripped...)
 	body, stripped = StripUnresolved(body)
 	allStripped = append(allStripped, stripped...)
 	allStripped = uniqueStrings(allStripped)
 
 	return EmailParams{
-		FromName:     seq.Defaults.FromName,
+		FromName:     fromName,
 		FromEmail:    fromEmail,
 		ToEmail:      lead["email"],
 		Subject:      subject,
 		Body:         body,
 		StrippedVars: allStripped,
 	}
+}
+
+func mergeTemplateFields(lead map[string]string, sender map[string]string) map[string]string {
+	fields := make(map[string]string, len(lead)+len(sender))
+	for key, value := range sender {
+		fields[key] = value
+	}
+	for key, value := range lead {
+		fields[key] = value
+	}
+	return fields
 }
 
 func uniqueStrings(values []string) []string {

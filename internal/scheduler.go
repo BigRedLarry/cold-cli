@@ -82,6 +82,7 @@ func (s *Sequence) CollectPlaceholders() []string {
 		}
 	}
 
+	collect(s.Defaults.FromName)
 	for _, step := range s.Steps {
 		collect(step.Subject)
 		collect(step.Body)
@@ -831,6 +832,12 @@ func ValidateLeadFields(leads []LeadRecord, placeholders []string) ([]string, er
 			availableList = append(availableList, f)
 		}
 	}
+	for _, f := range SenderFields {
+		if !available[f] {
+			available[f] = true
+			availableList = append(availableList, f)
+		}
+	}
 	for k := range leads[0].Fields {
 		if !available[k] {
 			available[k] = true
@@ -872,6 +879,9 @@ func ValidateLeadFields(leads []LeadRecord, placeholders []string) ([]string, er
 	for _, lead := range leads {
 		var missing []string
 		for i, rp := range resolved {
+			if senderFieldSet[rp] {
+				continue
+			}
 			if val, ok := lead.Fields[rp]; !ok || val == "" {
 				missing = append(missing, "{{"+placeholders[i]+"}}")
 			}
