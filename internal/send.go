@@ -20,6 +20,10 @@ type EmailParams struct {
 	Subject   string
 	Body      string
 
+	// HTMLBody is the raw HTML to send. If empty, the message is built from
+	// Body via plainTextToHTML.
+	HTMLBody string
+
 	// For follow-ups (step 2+)
 	InReplyTo  string // Message-ID of the previous step
 	References string // same as InReplyTo for simple chains
@@ -82,7 +86,11 @@ func BuildRFCMessage(p EmailParams) string {
 	msg.WriteString("MIME-Version: 1.0\r\n")
 	msg.WriteString("Content-Type: text/html; charset=utf-8\r\n")
 	msg.WriteString("\r\n")
-	msg.WriteString(plainTextToHTML(p.Body))
+	htmlBody := p.HTMLBody
+	if htmlBody == "" {
+		htmlBody = plainTextToHTML(p.Body)
+	}
+	msg.WriteString(htmlBody)
 
 	return msg.String()
 }
@@ -148,6 +156,7 @@ func BuildEmailForSend(
 	// Select subject and body based on variant
 	subject := step.Subject
 	body := step.Body
+	htmlBody := step.HTMLBody
 
 	if variantIndex > 0 && variantIndex <= len(step.Variants) {
 		v := step.Variants[variantIndex-1]
@@ -157,6 +166,9 @@ func BuildEmailForSend(
 		if v.Body != "" {
 			body = v.Body
 		}
+		if v.HTMLBody != "" {
+			htmlBody = v.HTMLBody
+		}
 	}
 
 	fields := mergeTemplateFields(lead, SenderTemplateFields(fromEmail))
@@ -165,6 +177,7 @@ func BuildEmailForSend(
 	fromName := RenderTemplate(seq.Defaults.FromName, fields)
 	subject = RenderTemplate(subject, fields)
 	body = RenderTemplate(body, fields)
+	htmlBody = RenderTemplate(htmlBody, fields)
 
 	// Strip any remaining unresolved {{variables}}
 	var allStripped []string
@@ -174,6 +187,8 @@ func BuildEmailForSend(
 	allStripped = append(allStripped, stripped...)
 	body, stripped = StripUnresolved(body)
 	allStripped = append(allStripped, stripped...)
+	htmlBody, stripped = StripUnresolved(htmlBody)
+	allStripped = append(allStripped, stripped...)
 	allStripped = uniqueStrings(allStripped)
 
 	return EmailParams{
@@ -182,6 +197,7 @@ func BuildEmailForSend(
 		ToEmail:      lead["email"],
 		Subject:      subject,
 		Body:         body,
+		HTMLBody:     htmlBody,
 		StrippedVars: allStripped,
 	}
 }

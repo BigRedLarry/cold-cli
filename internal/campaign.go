@@ -562,6 +562,7 @@ type RenderedEmail struct {
 	FromName     string   `json:"from_name"`
 	Subject      string   `json:"subject"`
 	Body         string   `json:"body"`
+	HTMLBody     string   `json:"html_body,omitempty"`
 	StrippedVars []string `json:"stripped_vars,omitempty"`
 }
 
@@ -677,6 +678,7 @@ func GetCampaignRenderedPreview(db *sql.DB, name string, leadEmail string) ([]Re
 			FromName:     params.FromName,
 			Subject:      params.Subject,
 			Body:         params.Body,
+			HTMLBody:     params.HTMLBody,
 			StrippedVars: params.StrippedVars,
 		})
 	}

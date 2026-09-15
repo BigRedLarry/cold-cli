@@ -28,12 +28,14 @@ type SequenceStep struct {
 	Delay    int               `yaml:"delay"` // days after previous step
 	Subject  string            `yaml:"subject"`
 	Body     string            `yaml:"body"`
+	HTMLBody string            `yaml:"html,omitempty"` // optional raw HTML; falls back to plainTextToHTML(body)
 	Variants []SequenceVariant `yaml:"variants"`
 }
 
 type SequenceVariant struct {
-	Subject string `yaml:"subject"`
-	Body    string `yaml:"body"`
+	Subject  string `yaml:"subject"`
+	Body     string `yaml:"body"`
+	HTMLBody string `yaml:"html,omitempty"`
 }
 
 // ParseSequence reads and parses a sequence YAML file.

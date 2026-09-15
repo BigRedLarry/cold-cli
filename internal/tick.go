@@ -349,7 +349,7 @@ func Tick(cfg TickConfig) (*TickResult, error) {
 			ToEmails:        emailParams.ToEmail,
 			Subject:         emailParams.Subject,
 			TextBody:        emailParams.Body,
-			HTMLBody:        plainTextToHTML(emailParams.Body),
+			HTMLBody:        firstNonEmpty(emailParams.HTMLBody, plainTextToHTML(emailParams.Body)),
 			Snippet:         emailSnippetFromBody(emailParams.Body),
 			OccurredAt:      now,
 		}); err != nil {

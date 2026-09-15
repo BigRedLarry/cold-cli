@@ -1027,20 +1027,24 @@ var campaignPreviewCmd = &cobra.Command{
 				return printJSON(map[string]any{"campaign": name, "emails": rendered})
 			}
 			for i, e := range rendered {
-				if i > 0 {
-					fmt.Println(strings.Repeat("-", 60))
-				}
-				from := e.AccountEmail
-				if e.FromName != "" {
-					from = fmt.Sprintf("%s <%s>", e.FromName, e.AccountEmail)
-				}
-				fmt.Printf("Step %d (variant %d) | %s -> %s\n", e.StepNumber, e.VariantIndex, from, e.LeadEmail)
-				fmt.Printf("Subject: %s\n\n", e.Subject)
-				if len(e.StrippedVars) > 0 {
-					fmt.Printf("Stripped vars: %s\n\n", strings.Join(e.StrippedVars, ", "))
-				}
+if i > 0 {
+				fmt.Println(strings.Repeat("-", 60))
+			}
+			from := e.AccountEmail
+			if e.FromName != "" {
+				from = fmt.Sprintf("%s <%s>", e.FromName, e.AccountEmail)
+			}
+			fmt.Printf("Step %d (variant %d) | %s -> %s\n", e.StepNumber, e.VariantIndex, from, e.LeadEmail)
+			fmt.Printf("Subject: %s\n\n", e.Subject)
+			if len(e.StrippedVars) > 0 {
+				fmt.Printf("Stripped vars: %s\n\n", strings.Join(e.StrippedVars, ", "))
+			}
+			if e.HTMLBody != "" {
+				fmt.Println(e.HTMLBody)
+			} else {
 				fmt.Println(e.Body)
-				fmt.Println()
+			}
+			fmt.Println()
 			}
 			return nil
 		}
